@@ -32,5 +32,27 @@ pub fn parse_memory(mem: &str) -> Result<String> {
     };
 
     let val: u64 = val_str.parse().context("Failed to parse memory value")?;
+    if val == 0 {
+        return Ok("0".to_string());
+    }
     Ok((val * unit).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_memory() {
+        assert_eq!(parse_memory("max").unwrap(), "max");
+        assert_eq!(parse_memory("512M").unwrap(), (512 * 1024 * 1024).to_string());
+        assert_eq!(parse_memory("1G").unwrap(), (1024 * 1024 * 1024).to_string());
+        assert_eq!(parse_memory("10k").unwrap(), (10 * 1024).to_string());
+        assert_eq!(parse_memory("100").unwrap(), "100");
+    }
+
+    #[test]
+    fn test_parse_memory_invalid() {
+        assert!(parse_memory("abc").is_err());
+    }
 }

@@ -2,6 +2,12 @@
 name = "Nucleus"
 version = "0.1.0"
 edition = "2024"
+authors = ["Sumant"]
+description = "A high-performance, minimalist container engine written in Rust."
+repository = "https://github.com/sumant1122/Nucleus"
+keywords = ["containers", "rust", "linux", "namespaces", "cgroups"]
+categories = ["virtualization", "os", "command-line-utilities"]
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # We split 'unistd' into 'fs' (for chroot/chdir) and 'process' (for execvp)
