@@ -1,7 +1,11 @@
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about = "Nucleus: High-performance Rust Container Engine")]
+#[command(
+    author,
+    version,
+    about = "Nucleus: High-performance Rust Container Engine"
+)]
 pub struct OxideArgs {
     /// Unique name for the container instance
     #[arg(short, long)]

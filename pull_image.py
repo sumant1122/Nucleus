@@ -1,5 +1,5 @@
+import subprocess
 import os
-import tarfile
 import urllib.request
 import shutil
 import sys
@@ -11,10 +11,16 @@ DISTROS = {
     "debian": "https://github.com/debuerreotype/docker-debian-artifacts/raw/dist-amd64/bookworm/rootfs.tar.xz"
 }
 
+CACHE_DIR = "./cached_images"
+
 def setup_rootfs(distro_name, target_dir="./rootfs"):
     if distro_name not in DISTROS:
         print(f"Error: Distro '{distro_name}' not supported. Choose from: {list(DISTROS.keys())}")
         return
+
+    # Create cache dir if it doesn't exist
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
 
     # 1. Cleanup old rootfs
     if os.path.exists(target_dir):
@@ -22,28 +28,30 @@ def setup_rootfs(distro_name, target_dir="./rootfs"):
         shutil.rmtree(target_dir)
     os.makedirs(target_dir)
 
-    # 2. Download
+    # 2. Check Cache or Download
     url = DISTROS[distro_name]
-    file_name = f"base_image.tar.gz"
-    print(f"Downloading {distro_name} from {url}...")
-    
+    # Simple extension detection
+    ext = ".tar.gz" if ".tar.gz" in url else ".tar.xz"
+    cache_path = os.path.join(CACHE_DIR, f"{distro_name}{ext}")
+
+    if os.path.exists(cache_path):
+        print(f"Using cached image: {cache_path}")
+    else:
+        print(f"Downloading {distro_name} from {url}...")
+        try:
+            urllib.request.urlretrieve(url, cache_path)
+            print("Download complete.")
+        except Exception as e:
+            print(f"Error downloading image: {e}")
+            return
+
+    # 3. Extract
     try:
-        urllib.request.urlretrieve(url, file_name)
-        print("Download complete.")
-
-        # 3. Extract
         print(f"Extracting to {target_dir}...")
-        with tarfile.open(file_name) as tar:
-            tar.extractall(path=target_dir)
-        
+        subprocess.run(["tar", "-xf", cache_path, "-C", target_dir], check=True)
         print(f"Success! {distro_name} is ready in {target_dir}")
-
     except Exception as e:
         print(f"Error: {e}")
-    finally:
-        # 4. Cleanup the tar file
-        if os.path.exists(file_name):
-            os.remove(file_name)
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else "alpine"

@@ -30,3 +30,6 @@ Thumbs.db
 
 # --- Logs ---
 *.log
+
+# --- Cached Images ---
+cached_images/

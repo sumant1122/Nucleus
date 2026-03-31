@@ -1,23 +1,29 @@
+use crate::args::OxideArgs;
 use anyhow::{Context, Result};
 use caps::{CapSet, Capability};
-use nix::mount::{mount, MsFlags, umount2, MntFlags};
-use nix::sched::{unshare, CloneFlags};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{chdir, execvp, read, sethostname, pivot_root, fork, ForkResult};
+use nix::mount::{MntFlags, MsFlags, mount, umount2};
+use nix::sched::{CloneFlags, unshare};
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::{ForkResult, chdir, execvp, fork, pivot_root, read, sethostname};
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::io::RawFd;
 use std::path::Path;
-use crate::args::OxideArgs;
 
 /// Child Context: Isolates itself and prepares the container environment.
 pub fn run_container_child(args: OxideArgs) -> Result<()> {
     // 1. Isolate BEFORE doing anything else
-    unshare(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWCGROUP)
-        .context("Failed to isolate child namespaces")?;
+    unshare(
+        CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWPID
+            | CloneFlags::CLONE_NEWNET
+            | CloneFlags::CLONE_NEWCGROUP,
+    )
+    .context("Failed to isolate child namespaces")?;
 
     // 2. Fork into the new PID namespace
-    // In Linux, the process that calls unshare(CLONE_NEWPID) doesn't enter the namespace, 
+    // In Linux, the process that calls unshare(CLONE_NEWPID) doesn't enter the namespace,
     // but its next child becomes PID 1.
     match unsafe { fork() }.context("Failed to fork after unshare")? {
         ForkResult::Parent { child } => {
@@ -38,8 +44,14 @@ pub fn run_container_child(args: OxideArgs) -> Result<()> {
 
 fn setup_container_env(args: OxideArgs) -> Result<()> {
     // Fix pivot_root EINVAL: Ensure our mount namespace is private
-    mount(None::<&str>, "/", None::<&str>, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None::<&str>)
-        .context("Failed to set mount propagation to private")?;
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .context("Failed to set mount propagation to private")?;
 
     // Sync with Parent: Wait for host-side networking to be ready
     let pipe_fd = args.pipe_fd.context("Missing pipe handle")?;
@@ -51,22 +63,35 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
 
     // Layered Filesystem (OverlayFS)
     let root_base = format!("./temp/{}", args.name);
+    let _ = fs::remove_dir_all(&root_base);
     let upper = format!("{}/upper", root_base);
     let work = format!("{}/work", root_base);
     let merged = format!("{}/merged", root_base);
-    
+
     fs::create_dir_all(&upper).ok();
     fs::create_dir_all(&work).ok();
     fs::create_dir_all(&merged).ok();
 
     let overlay_opts = format!("lowerdir=./rootfs,upperdir={},workdir={}", upper, work);
-    mount(Some("overlay"), merged.as_str(), Some("overlay"), MsFlags::empty(), Some(overlay_opts.as_str()))
-        .context("Failed to mount OverlayFS")?;
+    mount(
+        Some("overlay"),
+        merged.as_str(),
+        Some("overlay"),
+        MsFlags::empty(),
+        Some(overlay_opts.as_str()),
+    )
+    .context("Failed to mount OverlayFS")?;
 
     // Pivot Root
-    mount(Some(merged.as_str()), merged.as_str(), None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REC, None::<&str>)
-        .context("Failed to bind mount root for pivot_root")?;
-    
+    mount(
+        Some(merged.as_str()),
+        merged.as_str(),
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .context("Failed to bind mount root for pivot_root")?;
+
     let old_root_name = ".old_root";
     let old_root_path = Path::new(&merged).join(old_root_name);
     fs::create_dir_all(&old_root_path).context("Failed to create old_root dir")?;
@@ -75,23 +100,53 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
     chdir("/").context("Failed to chdir to new root")?;
 
     let old_root_path_in_container = format!("/{}", old_root_name);
-    umount2(old_root_path_in_container.as_str(), MntFlags::MNT_DETACH).context("Failed to unmount old root")?;
+    umount2(old_root_path_in_container.as_str(), MntFlags::MNT_DETACH)
+        .context("Failed to unmount old root")?;
     fs::remove_dir(old_root_path_in_container.as_str()).ok();
 
     // System Mounts (Procfs, Sysfs, DNS, Volumes)
-    mount(Some("proc"), "/proc", Some("proc"), MsFlags::empty(), None::<&str>).context("Failed to mount proc")?;
-    
+    fs::create_dir_all("/proc").ok();
+    mount(
+        Some("proc"),
+        "/proc",
+        Some("proc"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .context("Failed to mount proc")?;
+    fs::create_dir_all("/etc").ok();
+
     fs::create_dir_all("/sys").ok();
-    mount(Some("sysfs"), "/sys", Some("sysfs"), MsFlags::empty(), None::<&str>).context("Failed to mount sysfs")?;
+    mount(
+        Some("sysfs"),
+        "/sys",
+        Some("sysfs"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .context("Failed to mount sysfs")?;
 
     fs::create_dir_all("/sys/fs/cgroup").ok();
-    mount(Some("cgroup2"), "/sys/fs/cgroup", Some("cgroup2"), MsFlags::empty(), None::<&str>).context("Failed to mount cgroup2")?;
-    
+    mount(
+        Some("cgroup2"),
+        "/sys/fs/cgroup",
+        Some("cgroup2"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .context("Failed to mount cgroup2")?;
+
     let resolv_conf = "/etc/resolv.conf";
     if Path::new(resolv_conf).exists() {
-        fs::File::create(resolv_conf).ok(); 
-        mount(Some(resolv_conf), resolv_conf, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_RDONLY, None::<&str>)
-            .context("Failed to bind mount resolv.conf")?;
+        fs::File::create(resolv_conf).ok();
+        mount(
+            Some(resolv_conf),
+            resolv_conf,
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+            None::<&str>,
+        )
+        .context("Failed to bind mount resolv.conf")?;
     }
 
     // Bind User Volumes: -v /host:/container
@@ -104,23 +159,45 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
             } else {
                 format!("/{}", parts[1])
             };
-            
+
             fs::create_dir_all(&container_path).ok();
-            mount(Some(host_path), container_path.as_str(), None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REC, None::<&str>)
-                .context(format!("Failed to bind mount volume: {}", vol))?;
+            mount(
+                Some(host_path),
+                container_path.as_str(),
+                None::<&str>,
+                MsFlags::MS_BIND | MsFlags::MS_REC,
+                None::<&str>,
+            )
+            .context(format!("Failed to bind mount volume: {}", vol))?;
         }
     }
 
     // Security: Drop dangerous capabilities
     drop_capabilities()?;
 
+    // Setup Environment Variables
+    unsafe {
+        std::env::set_var(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        );
+        std::env::set_var("HOME", "/root");
+        std::env::set_var("USER", "root");
+        std::env::remove_var("PS1");
+        std::env::remove_var("PROMPT");
+    }
+
     // Execute Target Command
     println!("[Container] Entering {}...", args.command[0]);
     let cmd = CString::new(args.command[0].as_str()).unwrap();
-    let c_args: Vec<CString> = args.command.iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
-    
+    let c_args: Vec<CString> = args
+        .command
+        .iter()
+        .map(|s| CString::new(s.as_str()).unwrap())
+        .collect();
+
     execvp(&cmd, &c_args).context("Failed to execute inner command")?;
-    
+
     Ok(())
 }
 

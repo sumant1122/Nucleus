@@ -7,9 +7,14 @@ pub fn run_command(cmd: &str, args: &[&str]) -> Result<()> {
         .args(args)
         .status()
         .context(format!("Failed to execute command: {} {:?}", cmd, args))?;
-    
+
     if !status.success() {
-        return Err(anyhow::anyhow!("Command {} {:?} failed with status: {}", cmd, args, status));
+        return Err(anyhow::anyhow!(
+            "Command {} {:?} failed with status: {}",
+            cmd,
+            args,
+            status
+        ));
     }
     Ok(())
 }
@@ -22,11 +27,11 @@ pub fn parse_memory(mem: &str) -> Result<String> {
 
     let mem = mem.to_uppercase();
     let (val_str, unit) = if mem.ends_with('G') {
-        (&mem[..mem.len()-1], 1024 * 1024 * 1024)
+        (&mem[..mem.len() - 1], 1024 * 1024 * 1024)
     } else if mem.ends_with('M') {
-        (&mem[..mem.len()-1], 1024 * 1024)
+        (&mem[..mem.len() - 1], 1024 * 1024)
     } else if mem.ends_with('K') {
-        (&mem[..mem.len()-1], 1024)
+        (&mem[..mem.len() - 1], 1024)
     } else {
         (mem.as_str(), 1)
     };
@@ -45,8 +50,14 @@ mod tests {
     #[test]
     fn test_parse_memory() {
         assert_eq!(parse_memory("max").unwrap(), "max");
-        assert_eq!(parse_memory("512M").unwrap(), (512 * 1024 * 1024).to_string());
-        assert_eq!(parse_memory("1G").unwrap(), (1024 * 1024 * 1024).to_string());
+        assert_eq!(
+            parse_memory("512M").unwrap(),
+            (512 * 1024 * 1024).to_string()
+        );
+        assert_eq!(
+            parse_memory("1G").unwrap(),
+            (1024 * 1024 * 1024).to_string()
+        );
         assert_eq!(parse_memory("10k").unwrap(), (10 * 1024).to_string());
         assert_eq!(parse_memory("100").unwrap(), "100");
     }
