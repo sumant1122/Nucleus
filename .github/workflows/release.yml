@@ -39,6 +39,9 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo dpkg --add-architecture arm64
+          # Update sources to include ports.ubuntu.com for arm64
+          sudo sed -i 's/http:\/\/archive.ubuntu.com\/ubuntu\//http:\/\/ports.ubuntu.com\/ubuntu-ports\//g' /etc/apt/sources.list
+          sudo sed -i 's/http:\/\/security.ubuntu.com\/ubuntu\//http:\/\/ports.ubuntu.com\/ubuntu-ports\//g' /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libseccomp-dev:arm64
 
