@@ -39,9 +39,18 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo dpkg --add-architecture arm64
-          # Update sources to include ports.ubuntu.com for arm64
-          sudo sed -i 's/http:\/\/archive.ubuntu.com\/ubuntu\//http:\/\/ports.ubuntu.com\/ubuntu-ports\//g' /etc/apt/sources.list
-          sudo sed -i 's/http:\/\/security.ubuntu.com\/ubuntu\//http:\/\/ports.ubuntu.com\/ubuntu-ports\//g' /etc/apt/sources.list
+          # Update existing sources to be amd64 only to prevent 404s
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's/^Types: deb/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          # Add arm64 specific ports repositories
+          sudo bash -c 'echo "Types: deb
+          Architectures: arm64
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-security
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg" > /etc/apt/sources.list.d/arm64.sources'
+          
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libseccomp-dev:arm64
 
