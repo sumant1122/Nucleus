@@ -38,4 +38,12 @@ pub struct OxideArgs {
     /// Internal flag for sync pipe handle
     #[arg(long, hide = true)]
     pub pipe_fd: Option<i32>,
+
+    /// Run in rootless mode using User Namespaces
+    #[arg(long)]
+    pub rootless: bool,
+
+    /// Mount the root filesystem as read-only
+    #[arg(long)]
+    pub readonly: bool,
 }

@@ -14,7 +14,10 @@
     - **CPU**: Granular control over CPU cycles.
     - **PIDs**: Prevents "fork bombs" and fork errors by managing the PIDs controller.
 - **Layered Storage**: Implements OverlayFS with a read-only base image and a writable session layer.
-- **Security Hardening**: Drops dangerous Linux capabilities (e.g., `CAP_SYS_RAWIO`, `CAP_MKNOD`) before entering the target process.
+- **Rootless Mode**: Supports running as an unprivileged user using User Namespaces (`CLONE_NEWUSER`), mapping host users to `root` inside the container.
+- **Seccomp Filtering**: Integrated syscall filtering via `libseccomp` to restrict the attack surface of containerized processes.
+- **Read-only RootFS**: Option to remount the entire root filesystem as read-only for enhanced security.
+- **Security Hardening**: Drops dangerous Linux capabilities (e.g., `CAP_SYS_RAWIO`, `CAP_MKNOD`, `CAP_SYS_PTRACE`) before entering the target process.
 
 ---
 
@@ -48,8 +51,8 @@ You can download the latest pre-built binaries for **x86_64** and **aarch64** fr
 
 ### 2. Prerequisites
 - **OS**: Linux with Kernel 4.18+ (Cgroups v2 and OverlayFS support required).
-- **Tools**: `rustc`, `cargo`, `python3`, `iptables`, `iproute2`.
-- **Privileges**: Root access is mandatory for managing namespaces and networking.
+- **Tools**: `rustc`, `cargo`, `python3`, `iptables`, `iproute2`, `libseccomp-dev`.
+- **Privileges**: Root access is recommended for full networking/cgroups, but **Rootless Mode** is supported for unprivileged isolation.
 
 ### 3. Prepare a RootFS
 Nucleus requires a base directory to use as the container's root. Use the helper script to fetch a minimal Alpine Linux image:
@@ -98,6 +101,18 @@ sudo ./target/release/Nucleus \
   --ip 10.0.0.40 \
   --memory 512M \
   /bin/sh
+```
+
+### Unprivileged Rootless Execution
+Run Nucleus without root privileges using User Namespaces:
+```bash
+./target/release/Nucleus --rootless --name rootless-box --ip 10.0.0.50 /bin/sh
+```
+
+### Secure Read-only Environment
+Mount the root filesystem as read-only to prevent any modifications:
+```bash
+sudo ./target/release/Nucleus --readonly --name secure-box --ip 10.0.0.60 /bin/sh
 ```
 
 ---

@@ -1,10 +1,11 @@
 use crate::args::OxideArgs;
 use anyhow::{Context, Result};
 use caps::{CapSet, Capability};
+use libseccomp::*;
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use nix::sched::{CloneFlags, unshare};
 use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{ForkResult, chdir, execvp, fork, pivot_root, read, sethostname};
+use nix::unistd::{ForkResult, chdir, execvp, fork, getgid, getuid, pivot_root, read, sethostname};
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::io::RawFd;
@@ -12,17 +13,36 @@ use std::path::Path;
 
 /// Child Context: Isolates itself and prepares the container environment.
 pub fn run_container_child(args: OxideArgs) -> Result<()> {
-    // 1. Isolate BEFORE doing anything else
-    unshare(
-        CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWUTS
-            | CloneFlags::CLONE_NEWPID
-            | CloneFlags::CLONE_NEWNET
-            | CloneFlags::CLONE_NEWCGROUP,
-    )
-    .context("Failed to isolate child namespaces")?;
+    let host_uid = getuid();
+    let host_gid = getgid();
 
-    // 2. Fork into the new PID namespace
+    // 1. Isolate User Namespace FIRST if rootless
+    if args.rootless {
+        unshare(CloneFlags::CLONE_NEWUSER).context("Failed to unshare user namespace")?;
+        
+        println!("[Container] Setting up User Namespace ID mapping...");
+        // 1. Map UID
+        let uid_map = format!("0 {} 1", host_uid);
+        fs::write("/proc/self/uid_map", uid_map).context("Failed to write to uid_map")?;
+
+        // 2. Deny setgroups for GID mapping (mandatory for unprivileged GID mapping)
+        fs::write("/proc/self/setgroups", "deny").context("Failed to write to setgroups")?;
+
+        // 3. Map GID
+        let gid_map = format!("0 {} 1", host_gid);
+        fs::write("/proc/self/gid_map", gid_map).context("Failed to write to gid_map")?;
+    }
+
+    // 2. Isolate other namespaces
+    let clone_flags = CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWUTS
+        | CloneFlags::CLONE_NEWPID
+        | CloneFlags::CLONE_NEWNET
+        | CloneFlags::CLONE_NEWCGROUP;
+
+    unshare(clone_flags).context("Failed to isolate other namespaces")?;
+
+    // 3. Fork into the new PID namespace
     // In Linux, the process that calls unshare(CLONE_NEWPID) doesn't enter the namespace,
     // but its next child becomes PID 1.
     match unsafe { fork() }.context("Failed to fork after unshare")? {
@@ -39,6 +59,30 @@ pub fn run_container_child(args: OxideArgs) -> Result<()> {
             setup_container_env(args)?;
         }
     }
+    Ok(())
+}
+
+fn apply_seccomp_filter() -> Result<()> {
+    println!("[Container] Applying Seccomp syscall filter...");
+    let mut filter = ScmpFilterContext::new_filter(ScmpAction::Allow).context("Failed to create Seccomp context")?;
+
+    // Rule: Explicitly block some dangerous syscalls for demonstration
+    // In a production engine, you would use an allow-list with ScmpAction::Kill
+    let syscalls_to_block = [
+        "reboot",
+        "sethostname",
+        "swapon",
+        "swapoff",
+        "mount",
+        "umount2",
+    ];
+
+    for syscall_name in syscalls_to_block {
+        let syscall = ScmpSyscall::from_name(syscall_name).context(format!("Invalid syscall name: {}", syscall_name))?;
+        filter.add_rule(ScmpAction::Errno(libc::EPERM), syscall).context(format!("Failed to block syscall: {}", syscall_name))?;
+    }
+
+    filter.load().context("Failed to load Seccomp filter")?;
     Ok(())
 }
 
@@ -62,20 +106,27 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
     sethostname(&args.name).ok();
 
     // Layered Filesystem (OverlayFS)
-    let root_base = format!("./temp/{}", args.name);
+    let cwd = std::env::current_dir().context("Failed to get current dir")?;
+    let rootfs_path = cwd.join("rootfs");
+    let root_base = cwd.join("temp").join(&args.name);
     let _ = fs::remove_dir_all(&root_base);
-    let upper = format!("{}/upper", root_base);
-    let work = format!("{}/work", root_base);
-    let merged = format!("{}/merged", root_base);
+    let upper = root_base.join("upper");
+    let work = root_base.join("work");
+    let merged = root_base.join("merged");
 
-    fs::create_dir_all(&upper).ok();
-    fs::create_dir_all(&work).ok();
-    fs::create_dir_all(&merged).ok();
+    fs::create_dir_all(&upper).context("Failed to create upper dir")?;
+    fs::create_dir_all(&work).context("Failed to create work dir")?;
+    fs::create_dir_all(&merged).context("Failed to create merged dir")?;
 
-    let overlay_opts = format!("lowerdir=./rootfs,upperdir={},workdir={}", upper, work);
+    let overlay_opts = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        rootfs_path.to_str().unwrap(),
+        upper.to_str().unwrap(),
+        work.to_str().unwrap()
+    );
     mount(
         Some("overlay"),
-        merged.as_str(),
+        merged.to_str().unwrap(),
         Some("overlay"),
         MsFlags::empty(),
         Some(overlay_opts.as_str()),
@@ -84,8 +135,8 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
 
     // Pivot Root
     mount(
-        Some(merged.as_str()),
-        merged.as_str(),
+        Some(merged.to_str().unwrap()),
+        merged.to_str().unwrap(),
         None::<&str>,
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
@@ -93,10 +144,10 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
     .context("Failed to bind mount root for pivot_root")?;
 
     let old_root_name = ".old_root";
-    let old_root_path = Path::new(&merged).join(old_root_name);
+    let old_root_path = merged.join(old_root_name);
     fs::create_dir_all(&old_root_path).context("Failed to create old_root dir")?;
 
-    pivot_root(merged.as_str(), old_root_path.as_path()).context("Failed to pivot_root")?;
+    pivot_root(merged.to_str().unwrap(), old_root_path.as_path()).context("Failed to pivot_root")?;
     chdir("/").context("Failed to chdir to new root")?;
 
     let old_root_path_in_container = format!("/{}", old_root_name);
@@ -105,36 +156,17 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
     fs::remove_dir(old_root_path_in_container.as_str()).ok();
 
     // System Mounts (Procfs, Sysfs, DNS, Volumes)
+    // NOTE: In rootless mode, these might fail depending on host kernel policy.
+    // We attempt them and continue if they fail.
     fs::create_dir_all("/proc").ok();
-    mount(
-        Some("proc"),
-        "/proc",
-        Some("proc"),
-        MsFlags::empty(),
-        None::<&str>,
-    )
-    .context("Failed to mount proc")?;
+    let _ = mount(Some("proc"), "/proc", Some("proc"), MsFlags::empty(), None::<&str>);
     fs::create_dir_all("/etc").ok();
 
     fs::create_dir_all("/sys").ok();
-    mount(
-        Some("sysfs"),
-        "/sys",
-        Some("sysfs"),
-        MsFlags::empty(),
-        None::<&str>,
-    )
-    .context("Failed to mount sysfs")?;
+    let _ = mount(Some("sysfs"), "/sys", Some("sysfs"), MsFlags::empty(), None::<&str>);
 
     fs::create_dir_all("/sys/fs/cgroup").ok();
-    mount(
-        Some("cgroup2"),
-        "/sys/fs/cgroup",
-        Some("cgroup2"),
-        MsFlags::empty(),
-        None::<&str>,
-    )
-    .context("Failed to mount cgroup2")?;
+    let _ = mount(Some("cgroup2"), "/sys/fs/cgroup", Some("cgroup2"), MsFlags::empty(), None::<&str>);
 
     let resolv_conf = "/etc/resolv.conf";
     if Path::new(resolv_conf).exists() {
@@ -172,8 +204,24 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
         }
     }
 
+    // Read-only RootFS: Remount / as Read-only if requested
+    if args.readonly {
+        println!("[Container] Remounting root filesystem as read-only...");
+        mount(
+            None::<&str>,
+            "/",
+            None::<&str>,
+            MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+            None::<&str>,
+        )
+        .context("Failed to remount / as read-only")?;
+    }
+
     // Security: Drop dangerous capabilities
     drop_capabilities()?;
+
+    // Security: Apply Seccomp syscall filtering
+    apply_seccomp_filter()?;
 
     // Setup Environment Variables
     unsafe {
@@ -211,11 +259,15 @@ fn drop_capabilities() -> Result<()> {
         Capability::CAP_MAC_ADMIN,
         Capability::CAP_MAC_OVERRIDE,
         Capability::CAP_SYS_MODULE,
+        Capability::CAP_SYS_PTRACE,
+        Capability::CAP_SYS_PACCT,
+        Capability::CAP_SYS_TTY_CONFIG,
     ];
 
     for cap in to_drop {
-        caps::drop(None, CapSet::Inheritable, cap).context("Failed to drop inheritable cap")?;
-        caps::drop(None, CapSet::Bounding, cap).context("Failed to drop bounding cap")?;
+        // Some capabilities might already be missing or not available to drop
+        let _ = caps::drop(None, CapSet::Inheritable, cap);
+        let _ = caps::drop(None, CapSet::Bounding, cap);
     }
     Ok(())
 }
