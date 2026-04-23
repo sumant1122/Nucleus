@@ -21,3 +21,5 @@ reqwest = { version = "0.11", default-features = false, features = ["blocking", 
 tar = "0.4"
 flate2 = "1.0"
 xz2 = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

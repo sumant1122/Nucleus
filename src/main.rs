@@ -2,6 +2,7 @@ mod args;
 mod container;
 mod image;
 mod orchestrator;
+mod state;
 mod utils;
 
 use crate::args::{Commands, OxideArgs};
@@ -28,7 +29,16 @@ fn main() -> Result<()> {
             orchestrator::run_parent_orchestrator(run_args)?;
         }
         Some(Commands::List) => {
-            println!("[Nucleus] Listing containers (to be implemented)...");
+            let containers = state::list_containers()?;
+            if containers.is_empty() {
+                println!("[Nucleus] No containers running.");
+            } else {
+                println!("{:<20} {:<10} {:<15} {:<10}", "NAME", "PID", "IP", "STATUS");
+                println!("{:-<55}", "");
+                for c in containers {
+                    println!("{:<20} {:<10} {:<15} {:<10}", c.name, c.pid, c.ip, c.status);
+                }
+            }
         }
         Some(Commands::Pull { distro }) => {
             image::pull_image(&distro)?;

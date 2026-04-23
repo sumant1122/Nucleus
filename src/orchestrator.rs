@@ -72,6 +72,15 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
         .context("Failed to spawn child process")?;
 
     let pid = child.id();
+    
+    // Save state
+    crate::state::save_state(&crate::state::ContainerState {
+        name: args.name.clone(),
+        pid,
+        ip: args.ip.clone(),
+        status: "Running".to_string(),
+    })?;
+
     let short_name = if args.name.len() > 12 {
         &args.name[..12]
     } else {
@@ -232,6 +241,7 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
 
     // 8. Cleanup
     println!("[Nucleus] Cleaning up resources...");
+    let _ = crate::state::remove_state(&args.name);
     if !args.rootless {
         let _ = fs::remove_dir_all(&cgroup_path);
     }
