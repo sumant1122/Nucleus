@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -7,6 +7,34 @@ use clap::Parser;
     about = "Nucleus: High-performance Rust Container Engine"
 )]
 pub struct OxideArgs {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
+    /// Internal flag used for child process orchestration
+    #[arg(long, hide = true)]
+    pub internal_child: bool,
+
+    /// Arguments for internal child (passed directly when internal_child is true)
+    #[command(flatten)]
+    pub run_args: RunArgs,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Commands {
+    /// Run a command in a new container
+    Run(RunArgs),
+    /// List running containers
+    List,
+    /// Pull a rootfs image
+    Pull {
+        /// Distribution name (e.g., alpine, ubuntu, debian)
+        #[arg(default_value = "alpine")]
+        distro: String,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RunArgs {
     /// Unique name for the container instance
     #[arg(short, long)]
     pub name: String,
@@ -30,10 +58,6 @@ pub struct OxideArgs {
     /// The command and its arguments to run inside the container
     #[arg(trailing_var_arg = true, default_value = "/bin/sh")]
     pub command: Vec<String>,
-
-    /// Internal flag used for child process orchestration
-    #[arg(long, hide = true)]
-    pub internal_child: bool,
 
     /// Internal flag for sync pipe handle
     #[arg(long, hide = true)]

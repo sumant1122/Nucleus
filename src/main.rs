@@ -3,35 +3,38 @@ mod container;
 mod orchestrator;
 mod utils;
 
-use crate::args::OxideArgs;
+use crate::args::{Commands, OxideArgs};
 use anyhow::Result;
 use clap::Parser;
 use nix::unistd::getuid;
 
 fn main() -> Result<()> {
-    // 2. Parse CLI Arguments
     let args = OxideArgs::parse();
 
-    // 1. Startup Verification: Check for root
-    // Nucleus needs root for namespaces, mounts, and networking
-    // If --rootless is provided, we warn instead of erroring.
-    if !getuid().is_root() {
-        if !args.rootless {
-            return Err(anyhow::anyhow!(
-                "Nucleus must be run as root to manage namespaces and networking. Use --rootless for unprivileged isolation."
-            ));
-        } else {
-            println!("[Nucleus] Running in rootless mode...");
-        }
+    // Internal child execution branch (re-exec)
+    if args.internal_child {
+        return container::run_container_child(args.run_args);
     }
 
-    // 3. Execution Branch
-    // If internal_child is set, we are running INSIDE the isolated namespaces
-    if args.internal_child {
-        container::run_container_child(args)?;
-    } else {
-        // Otherwise, we are the host-side orchestrator
-        orchestrator::run_parent_orchestrator(args)?;
+    // Command Dispatch
+    match args.command {
+        Some(Commands::Run(run_args)) => {
+            if !getuid().is_root() && !run_args.rootless {
+                return Err(anyhow::anyhow!(
+                    "Nucleus must be run as root to manage namespaces and networking. Use --rootless for unprivileged isolation."
+                ));
+            }
+            orchestrator::run_parent_orchestrator(run_args)?;
+        }
+        Some(Commands::List) => {
+            println!("[Nucleus] Listing containers (to be implemented)...");
+        }
+        Some(Commands::Pull { distro }) => {
+            println!("[Nucleus] Pulling {} (to be implemented)...", distro);
+        }
+        None => {
+            println!("Use 'nucleus --help' for usage information.");
+        }
     }
 
     Ok(())

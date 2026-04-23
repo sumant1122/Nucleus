@@ -1,4 +1,4 @@
-use crate::args::OxideArgs;
+use crate::args::RunArgs;
 use anyhow::{Context, Result};
 use caps::{CapSet, Capability};
 use libseccomp::*;
@@ -12,7 +12,7 @@ use std::os::unix::io::RawFd;
 use std::path::Path;
 
 /// Child Context: Isolates itself and prepares the container environment.
-pub fn run_container_child(args: OxideArgs) -> Result<()> {
+pub fn run_container_child(args: RunArgs) -> Result<()> {
     let host_uid = getuid();
     let host_gid = getgid();
 
@@ -21,14 +21,9 @@ pub fn run_container_child(args: OxideArgs) -> Result<()> {
         unshare(CloneFlags::CLONE_NEWUSER).context("Failed to unshare user namespace")?;
 
         println!("[Container] Setting up User Namespace ID mapping...");
-        // 1. Map UID
         let uid_map = format!("0 {} 1", host_uid);
         fs::write("/proc/self/uid_map", uid_map).context("Failed to write to uid_map")?;
-
-        // 2. Deny setgroups for GID mapping (mandatory for unprivileged GID mapping)
         fs::write("/proc/self/setgroups", "deny").context("Failed to write to setgroups")?;
-
-        // 3. Map GID
         let gid_map = format!("0 {} 1", host_gid);
         fs::write("/proc/self/gid_map", gid_map).context("Failed to write to gid_map")?;
     }
@@ -43,11 +38,8 @@ pub fn run_container_child(args: OxideArgs) -> Result<()> {
     unshare(clone_flags).context("Failed to isolate other namespaces")?;
 
     // 3. Fork into the new PID namespace
-    // In Linux, the process that calls unshare(CLONE_NEWPID) doesn't enter the namespace,
-    // but its next child becomes PID 1.
     match unsafe { fork() }.context("Failed to fork after unshare")? {
         ForkResult::Parent { child } => {
-            // Wait for the containerized child (PID 1) to exit
             match waitpid(child, None).context("Failed to wait for child PID 1")? {
                 WaitStatus::Exited(_, code) => std::process::exit(code),
                 WaitStatus::Signaled(_, sig, _) => std::process::exit(128 + sig as i32),
@@ -55,7 +47,6 @@ pub fn run_container_child(args: OxideArgs) -> Result<()> {
             }
         }
         ForkResult::Child => {
-            // We are now PID 1 inside the new namespace.
             setup_container_env(args)?;
         }
     }
@@ -67,8 +58,6 @@ fn apply_seccomp_filter() -> Result<()> {
     let mut filter = ScmpFilterContext::new_filter(ScmpAction::Allow)
         .context("Failed to create Seccomp context")?;
 
-    // Rule: Explicitly block some dangerous syscalls for demonstration
-    // In a production engine, you would use an allow-list with ScmpAction::Kill
     let syscalls_to_block = [
         "reboot",
         "sethostname",
@@ -90,8 +79,7 @@ fn apply_seccomp_filter() -> Result<()> {
     Ok(())
 }
 
-fn setup_container_env(args: OxideArgs) -> Result<()> {
-    // Fix pivot_root EINVAL: Ensure our mount namespace is private
+fn setup_container_env(args: RunArgs) -> Result<()> {
     mount(
         None::<&str>,
         "/",
@@ -101,15 +89,12 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
     )
     .context("Failed to set mount propagation to private")?;
 
-    // Sync with Parent: Wait for host-side networking to be ready
     let pipe_fd = args.pipe_fd.context("Missing pipe handle")?;
     let mut buffer = [0; 4];
     read(pipe_fd as RawFd, &mut buffer).context("Sync read failed")?;
 
-    // Setup Internal Identity
     sethostname(&args.name).ok();
 
-    // Layered Filesystem (OverlayFS)
     let cwd = std::env::current_dir().context("Failed to get current dir")?;
     let rootfs_path = cwd.join("rootfs");
     let root_base = cwd.join("temp").join(&args.name);
@@ -137,7 +122,6 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
     )
     .context("Failed to mount OverlayFS")?;
 
-    // Pivot Root
     mount(
         Some(merged.to_str().unwrap()),
         merged.to_str().unwrap(),
@@ -160,9 +144,6 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
         .context("Failed to unmount old root")?;
     fs::remove_dir(old_root_path_in_container.as_str()).ok();
 
-    // System Mounts (Procfs, Sysfs, DNS, Volumes)
-    // NOTE: In rootless mode, these might fail depending on host kernel policy.
-    // We attempt them and continue if they fail.
     fs::create_dir_all("/proc").ok();
     let _ = mount(
         Some("proc"),
@@ -204,7 +185,6 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
         .context("Failed to bind mount resolv.conf")?;
     }
 
-    // Bind User Volumes: -v /host:/container
     for vol in &args.volumes {
         let parts: Vec<&str> = vol.split(':').collect();
         if parts.len() == 2 {
@@ -227,7 +207,6 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
         }
     }
 
-    // Read-only RootFS: Remount / as Read-only if requested
     if args.readonly {
         println!("[Container] Remounting root filesystem as read-only...");
         mount(
@@ -240,13 +219,9 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
         .context("Failed to remount / as read-only")?;
     }
 
-    // Security: Drop dangerous capabilities
     drop_capabilities()?;
-
-    // Security: Apply Seccomp syscall filtering
     apply_seccomp_filter()?;
 
-    // Setup Environment Variables
     unsafe {
         std::env::set_var(
             "PATH",
@@ -258,7 +233,6 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
         std::env::remove_var("PROMPT");
     }
 
-    // Execute Target Command
     println!("[Container] Entering {}...", args.command[0]);
     let cmd = CString::new(args.command[0].as_str()).unwrap();
     let c_args: Vec<CString> = args
@@ -288,7 +262,6 @@ fn drop_capabilities() -> Result<()> {
     ];
 
     for cap in to_drop {
-        // Some capabilities might already be missing or not available to drop
         let _ = caps::drop(None, CapSet::Inheritable, cap);
         let _ = caps::drop(None, CapSet::Bounding, cap);
     }

@@ -55,15 +55,9 @@ You can download the latest pre-built binaries for **x86_64** and **aarch64** fr
 - **Privileges**: Root access is recommended for full networking/cgroups, but **Rootless Mode** is supported for unprivileged isolation.
 
 ### 3. Prepare a RootFS
-Nucleus requires a base directory to use as the container's root. Use the helper script to fetch a minimal Alpine Linux image:
+Nucleus requires a base directory to use as the container's root. You can now pull images directly:
 ```bash
-python3 pull_image.py alpine
-```
-
-### 4. Build Nucleus (Optional)
-If you prefer building from source:
-```bash
-cargo build --release
+sudo ./target/release/Nucleus pull alpine
 ```
 
 ---
@@ -72,13 +66,13 @@ cargo build --release
 
 ### Run a basic isolated shell
 ```bash
-sudo ./target/release/Nucleus --name my-shell --ip 10.0.0.10 /bin/sh
+sudo ./target/release/Nucleus run --name my-shell --ip 10.0.0.10 /bin/sh
 ```
 
 ### Expose a Web Server (Port Mapping)
 Expose a container's port 80 to the host's port 8080:
 ```bash
-sudo ./target/release/Nucleus \
+sudo ./target/release/Nucleus run \
   --name web-app \
   --ip 10.0.0.20 \
   --ports 8080:80 \
@@ -87,7 +81,7 @@ sudo ./target/release/Nucleus \
 
 ### Mount Host Directories (Volumes)
 ```bash
-sudo ./target/release/Nucleus \
+sudo ./target/release/Nucleus run \
   --name dev-box \
   --ip 10.0.0.30 \
   --volumes /home/user/data:/mnt/data \
@@ -96,7 +90,7 @@ sudo ./target/release/Nucleus \
 
 ### Resource-Limited Environment
 ```bash
-sudo ./target/release/Nucleus \
+sudo ./target/release/Nucleus run \
   --name limited-box \
   --ip 10.0.0.40 \
   --memory 512M \
@@ -106,14 +100,20 @@ sudo ./target/release/Nucleus \
 ### Unprivileged Rootless Execution
 Run Nucleus without root privileges using User Namespaces:
 ```bash
-./target/release/Nucleus --rootless --name rootless-box --ip 10.0.0.50 /bin/sh
+./target/release/Nucleus run --rootless --name rootless-box --ip 10.0.0.50 /bin/sh
 ```
 
 ### Secure Read-only Environment
 Mount the root filesystem as read-only to prevent any modifications:
 ```bash
-sudo ./target/release/Nucleus --readonly --name secure-box --ip 10.0.0.60 /bin/sh
+sudo ./target/release/Nucleus run --readonly --name secure-box --ip 10.0.0.60 /bin/sh
 ```
+
+### List running containers
+```bash
+./target/release/Nucleus list
+```
+
 
 ---
 

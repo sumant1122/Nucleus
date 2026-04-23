@@ -1,4 +1,4 @@
-use crate::args::OxideArgs;
+use crate::args::RunArgs;
 use crate::utils::{parse_memory, run_command};
 use anyhow::{Context, Result};
 use nix::unistd::{pipe, write};
@@ -6,14 +6,13 @@ use std::fs;
 use std::process::{Command, Stdio};
 
 /// Parent Orchestrator: Sets up host networking, resource limits, and manages the child process.
-pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
+pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
     println!(
         "[Nucleus] Initializing orchestration for '{}'...",
         args.name
     );
 
     // 1. Setup Host Networking (Bridge)
-    // Only attempt if root and not in rootless mode
     if !args.rootless {
         let _ = Command::new("ip")
             .args(["link", "add", "br0", "type", "bridge"])
@@ -97,7 +96,6 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
         run_command("ip", &["link", "set", &v_host, "master", "br0"])?;
         run_command("ip", &["link", "set", &v_host, "up"])?;
 
-        // Configure Child Networking from the Parent (Safe & Robust)
         let pid_str = pid.to_string();
         let ns_base = ["-t", &pid_str, "-n", "ip"];
         run_command(
@@ -145,25 +143,15 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
     // 5. Resource Limits (Cgroups v2)
     let cgroup_path = format!("/sys/fs/cgroup/{}", args.name);
     if !args.rootless {
-        // Enable controllers in the root hierarchy
         let _ = fs::write(
             "/sys/fs/cgroup/cgroup.subtree_control",
             "+memory +cpu +pids",
         );
-
         fs::create_dir_all(&cgroup_path).context("Failed to create cgroup dir")?;
-
-        // Set memory limit in raw bytes (or "max")
         let mem_bytes = parse_memory(&args.memory)?;
         let _ = fs::write(format!("{}/memory.max", cgroup_path), &mem_bytes);
-
-        // Set CPU limit
         let _ = fs::write(format!("{}/cpu.max", cgroup_path), "max 100000");
-
-        // Set PID limit (prevent "can't fork" errors)
         let _ = fs::write(format!("{}/pids.max", cgroup_path), "max");
-
-        // Join the cgroup
         fs::write(format!("{}/cgroup.procs", cgroup_path), pid.to_string())
             .context("Failed to join cgroup")?;
     }
