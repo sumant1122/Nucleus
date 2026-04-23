@@ -1,5 +1,6 @@
 mod args;
 mod container;
+mod image;
 mod orchestrator;
 mod utils;
 
@@ -30,7 +31,7 @@ fn main() -> Result<()> {
             println!("[Nucleus] Listing containers (to be implemented)...");
         }
         Some(Commands::Pull { distro }) => {
-            println!("[Nucleus] Pulling {} (to be implemented)...", distro);
+            image::pull_image(&distro)?;
         }
         None => {
             println!("Use 'nucleus --help' for usage information.");
