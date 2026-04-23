@@ -6,9 +6,10 @@ mod state;
 mod utils;
 
 use crate::args::{Commands, OxideArgs};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use nix::unistd::getuid;
+use nix::sys::signal::{self, Signal};
+use nix::unistd::{Pid, getuid};
 
 fn main() -> Result<()> {
     let args = OxideArgs::parse();
@@ -38,6 +39,17 @@ fn main() -> Result<()> {
                 for c in containers {
                     println!("{:<20} {:<10} {:<15} {:<10}", c.name, c.pid, c.ip, c.status);
                 }
+            }
+        }
+        Some(Commands::Stop { name }) => {
+            let containers = state::list_containers()?;
+            if let Some(c) = containers.iter().find(|c| c.name == name) {
+                println!("[Nucleus] Stopping container '{}' (PID {})...", name, c.pid);
+                signal::kill(Pid::from_raw(c.pid as i32), Signal::SIGTERM)
+                    .context("Failed to send SIGTERM to container")?;
+                // State will be cleaned up by the orchestrator or next 'list' call
+            } else {
+                println!("[Nucleus] Container '{}' not found.", name);
             }
         }
         Some(Commands::Pull { distro }) => {

@@ -25,6 +25,11 @@ pub enum Commands {
     Run(RunArgs),
     /// List running containers
     List,
+    /// Stop a running container
+    Stop {
+        /// Name of the container to stop
+        name: String,
+    },
     /// Pull a rootfs image
     Pull {
         /// Distribution name (e.g., alpine, ubuntu, debian)

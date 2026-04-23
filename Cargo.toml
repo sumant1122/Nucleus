@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # We split 'unistd' into 'fs' (for chroot/chdir) and 'process' (for execvp)
-nix = { version = "0.27.1", features = ["sched", "mount", "hostname", "process", "fs", "user", "term"] }
+nix = { version = "0.27.1", features = ["sched", "mount", "hostname", "process", "fs", "user", "term", "signal"] }
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
 caps = "0.5"
