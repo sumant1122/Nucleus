@@ -114,6 +114,11 @@ sudo ./target/release/Nucleus run --readonly --name secure-box --ip 10.0.0.60 /b
 ./target/release/Nucleus list
 ```
 
+### Stop a running container
+```bash
+sudo ./target/release/Nucleus stop my-shell
+```
+
 
 ---
 

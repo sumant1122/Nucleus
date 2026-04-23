@@ -222,6 +222,14 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
     drop_capabilities()?;
     apply_seccomp_filter()?;
 
+    // TTY Support: Create a new session and set controlling terminal
+    if nix::unistd::isatty(libc::STDIN_FILENO).unwrap_or(false) {
+        let _ = nix::unistd::setsid();
+        unsafe {
+            libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 1);
+        }
+    }
+
     unsafe {
         std::env::set_var(
             "PATH",
