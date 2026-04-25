@@ -9,20 +9,15 @@ use clap::{Args, Parser, Subcommand};
 pub struct OxideArgs {
     #[command(subcommand)]
     pub command: Option<Commands>,
-
-    /// Internal flag used for child process orchestration
-    #[arg(long, hide = true)]
-    pub internal_child: bool,
-
-    /// Arguments for internal child (passed directly when internal_child is true)
-    #[command(flatten)]
-    pub run_args: RunArgs,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Run a command in a new container
     Run(RunArgs),
+    /// Internal subcommand used for child process orchestration
+    #[command(name = "internal-child", hide = true)]
+    InternalChild(RunArgs),
     /// List running containers
     List,
     /// Stop a running container

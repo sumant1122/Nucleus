@@ -14,13 +14,11 @@ use nix::unistd::{Pid, getuid};
 fn main() -> Result<()> {
     let args = OxideArgs::parse();
 
-    // Internal child execution branch (re-exec)
-    if args.internal_child {
-        return container::run_container_child(args.run_args);
-    }
-
     // Command Dispatch
     match args.command {
+        Some(Commands::InternalChild(run_args)) => {
+            return container::run_container_child(run_args);
+        }
         Some(Commands::Run(run_args)) => {
             if !getuid().is_root() && !run_args.rootless {
                 return Err(anyhow::anyhow!(

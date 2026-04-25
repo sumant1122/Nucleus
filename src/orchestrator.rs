@@ -37,7 +37,7 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
     // 3. Spawn Child
     let mut child_cmd = Command::new("/proc/self/exe");
     child_cmd
-        .arg("--internal-child")
+        .arg("internal-child")
         .arg("--name")
         .arg(&args.name)
         .arg("--ip")
