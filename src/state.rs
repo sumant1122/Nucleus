@@ -8,6 +8,8 @@ pub struct ContainerState {
     pub name: String,
     pub pid: u32,
     pub ip: String,
+    pub network: String,
+    pub veth_host: String,
     pub status: String,
 }
 

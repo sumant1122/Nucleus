@@ -20,6 +20,14 @@ pub enum Commands {
     InternalChild(RunArgs),
     /// List running containers
     List,
+    /// Fetch logs for a container
+    Logs {
+        /// Name of the container
+        name: String,
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+    },
     /// Stop a running container
     Stop {
         /// Name of the container to stop
@@ -35,13 +43,21 @@ pub enum Commands {
 
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
+    /// Name of the image to use (e.g., alpine, ubuntu)
+    #[arg(short, long, default_value = "alpine")]
+    pub image: String,
+
     /// Unique name for the container instance
     #[arg(short, long)]
     pub name: String,
 
-    /// Static IP address for the container (e.g., 10.0.0.10)
+    /// Static IP address for the container (e.g., 10.0.0.10). Auto-assigned if omitted.
     #[arg(short, long)]
-    pub ip: String,
+    pub ip: Option<String>,
+
+    /// Bridge network to use
+    #[arg(long, default_value = "br0")]
+    pub network: String,
 
     /// Memory limit for the container (e.g., 512M, 1G, or "max")
     #[arg(short, long, default_value = "1G")]
@@ -66,6 +82,10 @@ pub struct RunArgs {
     /// Run in rootless mode using User Namespaces
     #[arg(long)]
     pub rootless: bool,
+
+    /// Run container in background and redirect output to logs
+    #[arg(short, long)]
+    pub detach: bool,
 
     /// Mount the root filesystem as read-only
     #[arg(long)]

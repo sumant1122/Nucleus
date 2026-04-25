@@ -39,6 +39,23 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Some(Commands::Logs { name, follow }) => {
+            let log_path = format!("/tmp/nucleus/logs/{}.log", name);
+            if !std::path::Path::new(&log_path).exists() {
+                println!("[Nucleus] No logs found for container '{}'.", name);
+                return Ok(());
+            }
+
+            if follow {
+                std::process::Command::new("tail")
+                    .args(["-f", &log_path])
+                    .status()
+                    .context("Failed to tail log file")?;
+            } else {
+                let content = std::fs::read_to_string(&log_path).context("Failed to read log file")?;
+                print!("{}", content);
+            }
+        }
         Some(Commands::Stop { name }) => {
             let containers = state::list_containers()?;
             if let Some(c) = containers.iter().find(|c| c.name == name) {

@@ -8,7 +8,7 @@ use tar::Archive;
 use xz2::read::XzDecoder;
 
 const CACHE_DIR: &str = "./cached_images";
-const TARGET_DIR: &str = "./rootfs";
+pub const IMAGES_DIR: &str = "./images";
 
 pub fn pull_image(distro: &str) -> Result<()> {
     let mut distros = HashMap::new();
@@ -52,25 +52,26 @@ pub fn pull_image(distro: &str) -> Result<()> {
         println!("[Nucleus] Download complete.");
     }
 
-    if Path::new(TARGET_DIR).exists() {
-        println!("[Nucleus] Cleaning up old {}...", TARGET_DIR);
-        fs::remove_dir_all(TARGET_DIR).ok();
+    let target_dir = format!("{}/{}", IMAGES_DIR, distro);
+    if Path::new(&target_dir).exists() {
+        println!("[Nucleus] Image {} already extracted.", distro);
+        return Ok(());
     }
-    fs::create_dir_all(TARGET_DIR).context("Failed to create rootfs directory")?;
+    fs::create_dir_all(&target_dir).context("Failed to create image directory")?;
 
-    println!("[Nucleus] Extracting to {}...", TARGET_DIR);
+    println!("[Nucleus] Extracting to {}...", target_dir);
     let file = fs::File::open(&cache_path).context("Failed to open cached image")?;
     
     if cache_path.ends_with(".tar.gz") {
         let tar = GzDecoder::new(file);
         let mut archive = Archive::new(tar);
-        archive.unpack(TARGET_DIR).context("Failed to unpack tar.gz")?;
+        archive.unpack(&target_dir).context("Failed to unpack tar.gz")?;
     } else if cache_path.ends_with(".tar.xz") {
         let tar = XzDecoder::new(file);
         let mut archive = Archive::new(tar);
-        archive.unpack(TARGET_DIR).context("Failed to unpack tar.xz")?;
+        archive.unpack(&target_dir).context("Failed to unpack tar.xz")?;
     }
 
-    println!("[Nucleus] Success! {} is ready in {}", distro, TARGET_DIR);
+    println!("[Nucleus] Success! {} is ready in {}", distro, target_dir);
     Ok(())
 }

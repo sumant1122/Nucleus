@@ -96,7 +96,15 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
     sethostname(&args.name).ok();
 
     let cwd = std::env::current_dir().context("Failed to get current dir")?;
-    let rootfs_path = cwd.join("rootfs");
+    let rootfs_path = cwd.join(crate::image::IMAGES_DIR).join(&args.image);
+    if !rootfs_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Image '{}' not found in {}. Please run 'Nucleus pull {}' first.",
+            args.image,
+            crate::image::IMAGES_DIR,
+            args.image
+        ));
+    }
     let root_base = cwd.join("temp").join(&args.name);
     let _ = fs::remove_dir_all(&root_base);
     let upper = root_base.join("upper");
@@ -121,6 +129,39 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
         Some(overlay_opts.as_str()),
     )
     .context("Failed to mount OverlayFS")?;
+
+    // Bind mount host volumes into the merged rootfs BEFORE pivoting
+    for vol in &args.volumes {
+        let parts: Vec<&str> = vol.split(':').collect();
+        if parts.len() == 2 {
+            let host_part = parts[0];
+            let container_rel_path = if parts[1].starts_with('/') {
+                &parts[1][1..]
+            } else {
+                parts[1]
+            };
+            let target_path = merged.join(container_rel_path);
+
+            let host_path = if host_part.starts_with('/') || host_part.starts_with('.') {
+                Path::new(host_part).to_path_buf()
+            } else {
+                // Named volume
+                let vol_dir = Path::new("/tmp/nucleus/volumes").join(host_part);
+                fs::create_dir_all(&vol_dir).context("Failed to create named volume dir")?;
+                vol_dir
+            };
+
+            fs::create_dir_all(&target_path).context("Failed to create volume target dir")?;
+            mount(
+                Some(host_path.to_str().unwrap()),
+                target_path.to_str().unwrap(),
+                None::<&str>,
+                MsFlags::MS_BIND | MsFlags::MS_REC,
+                None::<&str>,
+            )
+            .context(format!("Failed to bind mount volume: {}", vol))?;
+        }
+    }
 
     mount(
         Some(merged.to_str().unwrap()),
@@ -183,28 +224,6 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
             None::<&str>,
         )
         .context("Failed to bind mount resolv.conf")?;
-    }
-
-    for vol in &args.volumes {
-        let parts: Vec<&str> = vol.split(':').collect();
-        if parts.len() == 2 {
-            let host_path = parts[0];
-            let container_path = if parts[1].starts_with('/') {
-                parts[1].to_string()
-            } else {
-                format!("/{}", parts[1])
-            };
-
-            fs::create_dir_all(&container_path).ok();
-            mount(
-                Some(host_path),
-                container_path.as_str(),
-                None::<&str>,
-                MsFlags::MS_BIND | MsFlags::MS_REC,
-                None::<&str>,
-            )
-            .context(format!("Failed to bind mount volume: {}", vol))?;
-        }
     }
 
     if args.readonly {
