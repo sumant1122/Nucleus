@@ -3,10 +3,12 @@
 **/*.rs.bk
 
 # --- Nucleus Runtime Data ---
-# Ignore the downloaded rootfs and temporary OverlayFS layers
+# Ignore images, temporary layers, and state
 /rootfs
 /temp
-/temp/*
+/images
+/cached_images
+/tmp/nucleus
 
 # --- Python ---
 __pycache__/
@@ -30,6 +32,3 @@ Thumbs.db
 
 # --- Logs ---
 *.log
-
-# --- Cached Images ---
-cached_images/
