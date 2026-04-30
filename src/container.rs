@@ -124,13 +124,13 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
 
     let overlay_opts = format!(
         "lowerdir={},upperdir={},workdir={}",
-        rootfs_path.to_str().unwrap(),
-        upper.to_str().unwrap(),
-        work.to_str().unwrap()
+        rootfs_path.to_str().context("Invalid rootfs path")?,
+        upper.to_str().context("Invalid upper path")?,
+        work.to_str().context("Invalid work path")?
     );
     mount(
         Some("overlay"),
-        merged.to_str().unwrap(),
+        &merged,
         Some("overlay"),
         MsFlags::empty(),
         Some(overlay_opts.as_str()),
@@ -139,8 +139,8 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
 
     // Pivot Root
     mount(
-        Some(merged.to_str().unwrap()),
-        merged.to_str().unwrap(),
+        Some(&merged),
+        &merged,
         None::<&str>,
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
@@ -151,7 +151,7 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
     let old_root_path = merged.join(old_root_name);
     fs::create_dir_all(&old_root_path).context("Failed to create old_root dir")?;
 
-    pivot_root(merged.to_str().unwrap(), old_root_path.as_path())
+    pivot_root(&merged, &old_root_path)
         .context("Failed to pivot_root")?;
     chdir("/").context("Failed to chdir to new root")?;
 
@@ -260,12 +260,12 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
 
     // Execute Target Command
     println!("[Container] Entering {}...", args.command[0]);
-    let cmd = CString::new(args.command[0].as_str()).unwrap();
+    let cmd = CString::new(args.command[0].as_str()).context("Invalid command")?;
     let c_args: Vec<CString> = args
         .command
         .iter()
-        .map(|s| CString::new(s.as_str()).unwrap())
-        .collect();
+        .map(|s| CString::new(s.as_str()).context("Invalid argument"))
+        .collect::<Result<Vec<_>>>()?;
 
     execvp(&cmd, &c_args).context("Failed to execute inner command")?;
 
