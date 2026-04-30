@@ -151,8 +151,7 @@ fn setup_container_env(args: OxideArgs) -> Result<()> {
     let old_root_path = merged.join(old_root_name);
     fs::create_dir_all(&old_root_path).context("Failed to create old_root dir")?;
 
-    pivot_root(&merged, &old_root_path)
-        .context("Failed to pivot_root")?;
+    pivot_root(&merged, &old_root_path).context("Failed to pivot_root")?;
     chdir("/").context("Failed to chdir to new root")?;
 
     let old_root_path_in_container = format!("/{}", old_root_name);
