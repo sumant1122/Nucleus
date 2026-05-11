@@ -4,16 +4,20 @@
 ## Key Features
 - **True PID Isolation**: Implements the "Fork-and-Wait" pattern to ensure the containerized process runs as **PID 1**.
 - **Secure Filesystem**: Uses `pivot_root` (not just `chroot`) combined with private mount propagation for industry-standard isolation.
+- **Image Management**: Support for multiple concurrent base images (Alpine, Ubuntu, Debian) with a local image store.
 - **Host-Driven Networking**: Configures container network interfaces from the host orchestrator using `nsenter`, ensuring high stability and avoiding `ENOMEM` errors during initialization.
 - **Advanced Networking**: 
     - Automated Linux Bridge (`br0`) and `veth` pair orchestration.
+    - **IPAM**: Automatic IP address allocation from an internal subnet.
     - Full Outbound Internet access via NAT/MASQUERADE.
     - **Port Mapping**: Expose container services to the host via `iptables` DNAT rules.
 - **Resource Management (Cgroups v2)**:
     - **Memory**: Support for human-readable limits (e.g., `1G`, `512M`) or `max`.
     - **CPU**: Granular control over CPU cycles.
     - **PIDs**: Prevents "fork bombs" and fork errors by managing the PIDs controller.
-- **Layered Storage**: Implements OverlayFS with a read-only base image and a writable session layer.
+- **Layered Storage**: Implements OverlayFS with a multi-image `lowerdir` and a writable session layer.
+- **Volumes**: Support for both host-path bind mounts and **Named Volumes** for persistent storage.
+- **Logging**: Integrated daemonless logging for background containers.
 - **Rootless Mode**: Supports running as an unprivileged user using User Namespaces (`CLONE_NEWUSER`), mapping host users to `root` inside the container.
 - **Seccomp Filtering**: Integrated syscall filtering via `libseccomp` to restrict the attack surface of containerized processes.
 - **Read-only RootFS**: Option to remount the entire root filesystem as read-only for enhanced security.
@@ -55,15 +59,9 @@ You can download the latest pre-built binaries for **x86_64** and **aarch64** fr
 - **Privileges**: Root access is recommended for full networking/cgroups, but **Rootless Mode** is supported for unprivileged isolation.
 
 ### 3. Prepare a RootFS
-Nucleus requires a base directory to use as the container's root. Use the helper script to fetch a minimal Alpine Linux image:
+Nucleus requires a base directory to use as the container's root. You can now pull images directly:
 ```bash
-python3 pull_image.py alpine
-```
-
-### 4. Build Nucleus (Optional)
-If you prefer building from source:
-```bash
-cargo build --release
+sudo ./target/release/Nucleus pull alpine
 ```
 
 ---
@@ -72,48 +70,65 @@ cargo build --release
 
 ### Run a basic isolated shell
 ```bash
-sudo ./target/release/Nucleus --name my-shell --ip 10.0.0.10 /bin/sh
+# IP is auto-assigned if omitted
+sudo ./target/release/Nucleus run --name my-shell --image alpine /bin/sh
 ```
 
 ### Expose a Web Server (Port Mapping)
-Expose a container's port 80 to the host's port 8080:
 ```bash
-sudo ./target/release/Nucleus \
+sudo ./target/release/Nucleus run \
   --name web-app \
-  --ip 10.0.0.20 \
+  --image ubuntu \
   --ports 8080:80 \
   /bin/sh
 ```
 
-### Mount Host Directories (Volumes)
+### Mount Host Directories & Named Volumes
 ```bash
-sudo ./target/release/Nucleus \
+# Named volumes are automatically created and persisted
+sudo ./target/release/Nucleus run \
   --name dev-box \
-  --ip 10.0.0.30 \
   --volumes /home/user/data:/mnt/data \
+  --volumes my-db-vol:/var/lib/db \
   /bin/sh
 ```
 
 ### Resource-Limited Environment
 ```bash
-sudo ./target/release/Nucleus \
+sudo ./target/release/Nucleus run \
   --name limited-box \
-  --ip 10.0.0.40 \
   --memory 512M \
   /bin/sh
 ```
 
 ### Unprivileged Rootless Execution
-Run Nucleus without root privileges using User Namespaces:
 ```bash
-./target/release/Nucleus --rootless --name rootless-box --ip 10.0.0.50 /bin/sh
+./target/release/Nucleus run --rootless --name rootless-box /bin/sh
+```
+
+### Background Execution & Logging
+Run a container in the background and fetch its logs:
+```bash
+sudo ./target/release/Nucleus run --name background-task --detach --image alpine /bin/sh -c "while true; do echo 'Working...'; sleep 5; done"
+sudo ./target/release/Nucleus logs background-task --follow
 ```
 
 ### Secure Read-only Environment
 Mount the root filesystem as read-only to prevent any modifications:
 ```bash
-sudo ./target/release/Nucleus --readonly --name secure-box --ip 10.0.0.60 /bin/sh
+sudo ./target/release/Nucleus run --readonly --name secure-box /bin/sh
 ```
+
+### List running containers
+```bash
+./target/release/Nucleus list
+```
+
+### Stop a running container
+```bash
+sudo ./target/release/Nucleus stop my-shell
+```
+
 
 ---
 

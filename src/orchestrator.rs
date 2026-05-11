@@ -1,4 +1,4 @@
-use crate::args::OxideArgs;
+use crate::args::RunArgs;
 use crate::utils::{parse_memory, run_command};
 use anyhow::{Context, Result};
 use nix::unistd::{pipe, write};
@@ -6,27 +6,34 @@ use std::fs;
 use std::process::{Command, Stdio};
 
 /// Parent Orchestrator: Sets up host networking, resource limits, and manages the child process.
-pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
+pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
     println!(
         "[Nucleus] Initializing orchestration for '{}'...",
         args.name
     );
 
+    // 0. IPAM: Determine IP
+    let container_ip = if let Some(ip) = &args.ip {
+        ip.clone()
+    } else {
+        allocate_ip().context("Failed to auto-allocate IP")?
+    };
+    println!("[Nucleus] Assigned IP: {}", container_ip);
+
     // 1. Setup Host Networking (Bridge)
-    // Only attempt if root and not in rootless mode
     if !args.rootless {
         let _ = Command::new("ip")
-            .args(["link", "add", "br0", "type", "bridge"])
+            .args(["link", "add", &args.network, "type", "bridge"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
         let _ = Command::new("ip")
-            .args(["addr", "add", "10.0.0.1/24", "dev", "br0"])
+            .args(["addr", "add", "10.0.0.1/24", "dev", &args.network])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
         let _ = Command::new("ip")
-            .args(["link", "set", "br0", "up"])
+            .args(["link", "set", &args.network, "up"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -38,15 +45,19 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
     // 3. Spawn Child
     let mut child_cmd = Command::new("/proc/self/exe");
     child_cmd
-        .arg("--internal-child")
+        .arg("internal-child")
+        .arg("--image")
+        .arg(&args.image)
         .arg("--name")
         .arg(&args.name)
         .arg("--ip")
-        .arg(&args.ip)
+        .arg(&container_ip)
         .arg("--pipe-fd")
         .arg(reader.to_string())
         .arg("--memory")
-        .arg(&args.memory);
+        .arg(&args.memory)
+        .arg("--network")
+        .arg(&args.network);
 
     if args.rootless {
         child_cmd.arg("--rootless");
@@ -64,15 +75,33 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
         child_cmd.arg("--ports").arg(port);
     }
 
+    let (stdout, stderr) = if args.detach {
+        let log_dir = "/tmp/nucleus/logs";
+        fs::create_dir_all(log_dir).context("Failed to create log directory")?;
+        let log_path = format!("{}/{}.log", log_dir, args.name);
+        let log_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .context("Failed to open log file")?;
+        let err_file = log_file
+            .try_clone()
+            .context("Failed to clone log file handle")?;
+        (Stdio::from(log_file), Stdio::from(err_file))
+    } else {
+        (Stdio::inherit(), Stdio::inherit())
+    };
+
     let mut child = child_cmd
         .args(&args.command)
         .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .context("Failed to spawn child process")?;
 
     let pid = child.id();
+
     let short_name = if args.name.len() > 12 {
         &args.name[..12]
     } else {
@@ -80,6 +109,16 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
     };
     let v_host = format!("vh-{}", short_name);
     let v_child = format!("vc-{}", short_name);
+
+    // Save state
+    crate::state::save_state(&crate::state::ContainerState {
+        name: args.name.clone(),
+        pid,
+        ip: container_ip.clone(),
+        network: args.network.clone(),
+        veth_host: v_host.clone(),
+        status: "Running".to_string(),
+    })?;
 
     // 4. Networking: Connect Host to Container
     if !args.rootless {
@@ -94,10 +133,9 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
             ],
         )?;
         run_command("ip", &["link", "set", &v_child, "netns", &pid.to_string()])?;
-        run_command("ip", &["link", "set", &v_host, "master", "br0"])?;
+        run_command("ip", &["link", "set", &v_host, "master", &args.network])?;
         run_command("ip", &["link", "set", &v_host, "up"])?;
 
-        // Configure Child Networking from the Parent (Safe & Robust)
         let pid_str = pid.to_string();
         let ns_base = ["-t", &pid_str, "-n", "ip"];
         run_command(
@@ -116,7 +154,7 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
                 ns_base[3],
                 "addr",
                 "add",
-                &format!("{}/24", args.ip),
+                &format!("{}/24", container_ip),
                 "dev",
                 "eth0",
             ],
@@ -145,25 +183,15 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
     // 5. Resource Limits (Cgroups v2)
     let cgroup_path = format!("/sys/fs/cgroup/{}", args.name);
     if !args.rootless {
-        // Enable controllers in the root hierarchy
         let _ = fs::write(
             "/sys/fs/cgroup/cgroup.subtree_control",
             "+memory +cpu +pids",
         );
-
         fs::create_dir_all(&cgroup_path).context("Failed to create cgroup dir")?;
-
-        // Set memory limit in raw bytes (or "max")
         let mem_bytes = parse_memory(&args.memory)?;
         let _ = fs::write(format!("{}/memory.max", cgroup_path), &mem_bytes);
-
-        // Set CPU limit
         let _ = fs::write(format!("{}/cpu.max", cgroup_path), "max 100000");
-
-        // Set PID limit (prevent "can't fork" errors)
         let _ = fs::write(format!("{}/pids.max", cgroup_path), "max");
-
-        // Join the cgroup
         fs::write(format!("{}/cgroup.procs", cgroup_path), pid.to_string())
             .context("Failed to join cgroup")?;
     }
@@ -181,16 +209,16 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
                 "10.0.0.0/24",
                 "!",
                 "-o",
-                "br0",
+                &args.network,
                 "-j",
                 "MASQUERADE",
             ])
             .status();
         let _ = Command::new("iptables")
-            .args(["-A", "FORWARD", "-i", "br0", "-j", "ACCEPT"])
+            .args(["-A", "FORWARD", "-i", &args.network, "-j", "ACCEPT"])
             .status();
         let _ = Command::new("iptables")
-            .args(["-A", "FORWARD", "-o", "br0", "-j", "ACCEPT"])
+            .args(["-A", "FORWARD", "-o", &args.network, "-j", "ACCEPT"])
             .status();
 
         for port_mapping in &args.ports {
@@ -205,7 +233,7 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
                         "-p",
                         "tcp",
                         "-d",
-                        &args.ip,
+                        &container_ip,
                         "--dport",
                         container_port,
                         "-m",
@@ -229,21 +257,41 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
                         "-j",
                         "DNAT",
                         "--to-destination",
-                        &format!("{}:{}", args.ip, container_port),
+                        &format!("{}:{}", container_ip, container_port),
                     ])
                     .status();
             }
         }
     }
 
-    // 7. Signal Child
+    // 7. Signal Child (Sync pipe)
     write(writer, b"done").ok();
     println!("[Nucleus] Network links established. Handing over control.");
+
+    // Signal Forwarding: Catch SIGINT/SIGTERM and forward to child
+    use nix::sys::signal::{self, SigSet, Signal};
+    let mut sigset = SigSet::empty();
+    sigset.add(Signal::SIGINT);
+    sigset.add(Signal::SIGTERM);
+    sigset.thread_block().context("Failed to block signals")?;
+
+    let child_pid = nix::unistd::Pid::from_raw(pid as i32);
+    std::thread::spawn(move || {
+        loop {
+            if let Ok(sig) = sigset.wait() {
+                let _ = signal::kill(child_pid, sig);
+                if sig == Signal::SIGTERM || sig == Signal::SIGINT {
+                    break;
+                }
+            }
+        }
+    });
 
     let status = child.wait().context("Container process failed")?;
 
     // 8. Cleanup
     println!("[Nucleus] Cleaning up resources...");
+    let _ = crate::state::remove_state(&args.name);
     if !args.rootless {
         let _ = fs::remove_dir_all(&cgroup_path);
     }
@@ -266,7 +314,7 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
                         "-p",
                         "tcp",
                         "-d",
-                        &args.ip,
+                        &container_ip,
                         "--dport",
                         container_port,
                         "-m",
@@ -290,7 +338,7 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
                         "-j",
                         "DNAT",
                         "--to-destination",
-                        &format!("{}:{}", args.ip, container_port),
+                        &format!("{}:{}", container_ip, container_port),
                     ])
                     .status();
             }
@@ -302,4 +350,20 @@ pub fn run_parent_orchestrator(args: OxideArgs) -> Result<()> {
         args.name, status
     );
     Ok(())
+}
+
+fn allocate_ip() -> Result<String> {
+    let containers = crate::state::list_containers()?;
+    let mut used_ips = std::collections::HashSet::new();
+    for c in containers {
+        used_ips.insert(c.ip);
+    }
+
+    for i in 2..254 {
+        let ip = format!("10.0.0.{}", i);
+        if !used_ips.contains(&ip) {
+            return Ok(ip);
+        }
+    }
+    Err(anyhow::anyhow!("No available IPs in subnet 10.0.0.0/24"))
 }
