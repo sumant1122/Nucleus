@@ -21,6 +21,8 @@
 - **Rootless Mode**: Supports running as an unprivileged user using User Namespaces (`CLONE_NEWUSER`), mapping host users to `root` inside the container.
 - **Seccomp Filtering**: Integrated syscall filtering via `libseccomp` to restrict the attack surface of containerized processes.
 - **Read-only RootFS**: Option to remount the entire root filesystem as read-only for enhanced security.
+- **Observability**: Real-time resource usage statistics (CPU, Memory, PIDs) via the `stats` command.
+- **Signal Forwarding**: Reliable propagation of signals (SIGINT, SIGTERM) from the host to the container's PID 1 for graceful shutdowns.
 - **Security Hardening**: Drops dangerous Linux capabilities (e.g., `CAP_SYS_RAWIO`, `CAP_MKNOD`, `CAP_SYS_PTRACE`) before entering the target process.
 
 ---
@@ -117,6 +119,12 @@ sudo ./target/release/Nucleus logs background-task --follow
 Mount the root filesystem as read-only to prevent any modifications:
 ```bash
 sudo ./target/release/Nucleus run --readonly --name secure-box /bin/sh
+```
+
+### Real-time Resource Statistics
+Monitor a container's CPU, Memory, and PID usage:
+```bash
+sudo ./target/release/Nucleus stats my-shell --stream
 ```
 
 ### List running containers
