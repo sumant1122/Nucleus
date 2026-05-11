@@ -33,6 +33,14 @@ pub enum Commands {
         /// Name of the container to stop
         name: String,
     },
+    /// Show resource usage statistics for a container
+    Stats {
+        /// Name of the container
+        name: String,
+        /// Stream statistics (continuous update)
+        #[arg(short, long)]
+        stream: bool,
+    },
     /// Pull a rootfs image
     Pull {
         /// Distribution name (e.g., alpine, ubuntu, debian)

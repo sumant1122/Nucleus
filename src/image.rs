@@ -61,15 +61,19 @@ pub fn pull_image(distro: &str) -> Result<()> {
 
     println!("[Nucleus] Extracting to {}...", target_dir);
     let file = fs::File::open(&cache_path).context("Failed to open cached image")?;
-    
+
     if cache_path.ends_with(".tar.gz") {
         let tar = GzDecoder::new(file);
         let mut archive = Archive::new(tar);
-        archive.unpack(&target_dir).context("Failed to unpack tar.gz")?;
+        archive
+            .unpack(&target_dir)
+            .context("Failed to unpack tar.gz")?;
     } else if cache_path.ends_with(".tar.xz") {
         let tar = XzDecoder::new(file);
         let mut archive = Archive::new(tar);
-        archive.unpack(&target_dir).context("Failed to unpack tar.xz")?;
+        archive
+            .unpack(&target_dir)
+            .context("Failed to unpack tar.xz")?;
     }
 
     println!("[Nucleus] Success! {} is ready in {}", distro, target_dir);

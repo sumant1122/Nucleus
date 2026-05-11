@@ -25,8 +25,8 @@ pub fn save_state(state: &ContainerState) -> Result<()> {
         fs::create_dir_all(&state_dir).context("Failed to create state directory")?;
     }
     let state_path = state_dir.join(format!("{}.json", state.name));
-    let json = serde_json::to_string_pretty(state)
-        .context("Failed to serialize container state")?;
+    let json =
+        serde_json::to_string_pretty(state).context("Failed to serialize container state")?;
     fs::write(state_path, json).context("Failed to write container state file")?;
     Ok(())
 }
@@ -53,7 +53,7 @@ pub fn list_containers() -> Result<Vec<ContainerState>> {
             let content = fs::read_to_string(&path).context("Failed to read state file")?;
             let state: ContainerState = serde_json::from_str(&content)
                 .context(format!("Failed to parse state file: {:?}", path))?;
-            
+
             // Basic liveness check: check if PID still exists
             if Path::new(&format!("/proc/{}", state.pid)).exists() {
                 containers.push(state);

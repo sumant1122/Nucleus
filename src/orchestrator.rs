@@ -84,7 +84,9 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
             .append(true)
             .open(log_path)
             .context("Failed to open log file")?;
-        let err_file = log_file.try_clone().context("Failed to clone log file handle")?;
+        let err_file = log_file
+            .try_clone()
+            .context("Failed to clone log file handle")?;
         (Stdio::from(log_file), Stdio::from(err_file))
     } else {
         (Stdio::inherit(), Stdio::inherit())
@@ -107,7 +109,7 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
     };
     let v_host = format!("vh-{}", short_name);
     let v_child = format!("vc-{}", short_name);
-    
+
     // Save state
     crate::state::save_state(&crate::state::ContainerState {
         name: args.name.clone(),
@@ -262,9 +264,28 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
         }
     }
 
-    // 7. Signal Child
+    // 7. Signal Child (Sync pipe)
     write(writer, b"done").ok();
     println!("[Nucleus] Network links established. Handing over control.");
+
+    // Signal Forwarding: Catch SIGINT/SIGTERM and forward to child
+    use nix::sys::signal::{self, SigSet, Signal};
+    let mut sigset = SigSet::empty();
+    sigset.add(Signal::SIGINT);
+    sigset.add(Signal::SIGTERM);
+    sigset.thread_block().context("Failed to block signals")?;
+
+    let child_pid = nix::unistd::Pid::from_raw(pid as i32);
+    std::thread::spawn(move || {
+        loop {
+            if let Ok(sig) = sigset.wait() {
+                let _ = signal::kill(child_pid, sig);
+                if sig == Signal::SIGTERM || sig == Signal::SIGINT {
+                    break;
+                }
+            }
+        }
+    });
 
     let status = child.wait().context("Container process failed")?;
 

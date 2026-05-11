@@ -3,6 +3,7 @@ mod container;
 mod image;
 mod orchestrator;
 mod state;
+mod stats;
 mod utils;
 
 use crate::args::{Commands, OxideArgs};
@@ -52,7 +53,8 @@ fn main() -> Result<()> {
                     .status()
                     .context("Failed to tail log file")?;
             } else {
-                let content = std::fs::read_to_string(&log_path).context("Failed to read log file")?;
+                let content =
+                    std::fs::read_to_string(&log_path).context("Failed to read log file")?;
                 print!("{}", content);
             }
         }
@@ -66,6 +68,9 @@ fn main() -> Result<()> {
             } else {
                 println!("[Nucleus] Container '{}' not found.", name);
             }
+        }
+        Some(Commands::Stats { name, stream }) => {
+            stats::display_stats(&name, stream)?;
         }
         Some(Commands::Pull { distro }) => {
             image::pull_image(&distro)?;
