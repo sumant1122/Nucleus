@@ -1,5 +1,7 @@
 use crate::args::RunArgs;
-use crate::utils::{parse_memory, run_command};
+use crate::utils::{
+    generate_veth_names, get_nucleus_log_dir, get_nucleus_runtime_dir, parse_memory, run_command,
+};
 use anyhow::{Context, Result};
 use nix::unistd::{pipe, write};
 use std::fs;
@@ -22,21 +24,29 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
 
     // 1. Setup Host Networking (Bridge)
     if !args.rootless {
-        let _ = Command::new("ip")
-            .args(["link", "add", &args.network, "type", "bridge"])
+        let br_check = Command::new("ip")
+            .args(["link", "show", &args.network])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        let _ = Command::new("ip")
-            .args(["addr", "add", "10.0.0.1/24", "dev", &args.network])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = Command::new("ip")
-            .args(["link", "set", &args.network, "up"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+
+        if br_check.map_or(true, |s| !s.success()) {
+            let _ = Command::new("ip")
+                .args(["link", "add", &args.network, "type", "bridge"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("ip")
+                .args(["addr", "add", "10.0.0.1/24", "dev", &args.network])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("ip")
+                .args(["link", "set", &args.network, "up"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 
     // 2. Sync Pipe
@@ -76,13 +86,13 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
     }
 
     let (stdout, stderr) = if args.detach {
-        let log_dir = "/tmp/nucleus/logs";
-        fs::create_dir_all(log_dir).context("Failed to create log directory")?;
-        let log_path = format!("{}/{}.log", log_dir, args.name);
+        let log_dir = get_nucleus_log_dir();
+        fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
+        let log_path = log_dir.join(format!("{}.log", args.name));
         let log_file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(log_path)
+            .open(&log_path)
             .context("Failed to open log file")?;
         let err_file = log_file
             .try_clone()
@@ -101,14 +111,7 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
         .context("Failed to spawn child process")?;
 
     let pid = child.id();
-
-    let short_name = if args.name.len() > 12 {
-        &args.name[..12]
-    } else {
-        &args.name
-    };
-    let v_host = format!("vh-{}", short_name);
-    let v_child = format!("vc-{}", short_name);
+    let (v_host, v_child) = generate_veth_names(&args.name);
 
     // Save state
     crate::state::save_state(&crate::state::ContainerState {
@@ -196,14 +199,15 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
             .context("Failed to join cgroup")?;
     }
 
-    // 6. Port Mapping & Forwarding
+    // 6. Port Mapping & Forwarding (Deduplicated)
     if !args.rootless {
         let _ = fs::write("/proc/sys/net/ipv4/ip_forward", "1");
-        let _ = Command::new("iptables")
+
+        let masq_check = Command::new("iptables")
             .args([
                 "-t",
                 "nat",
-                "-A",
+                "-C",
                 "POSTROUTING",
                 "-s",
                 "10.0.0.0/24",
@@ -213,13 +217,51 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
                 "-j",
                 "MASQUERADE",
             ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
-        let _ = Command::new("iptables")
-            .args(["-A", "FORWARD", "-i", &args.network, "-j", "ACCEPT"])
+
+        if masq_check.map_or(true, |s| !s.success()) {
+            let _ = Command::new("iptables")
+                .args([
+                    "-t",
+                    "nat",
+                    "-A",
+                    "POSTROUTING",
+                    "-s",
+                    "10.0.0.0/24",
+                    "!",
+                    "-o",
+                    &args.network,
+                    "-j",
+                    "MASQUERADE",
+                ])
+                .status();
+        }
+
+        let fwd_in = Command::new("iptables")
+            .args(["-C", "FORWARD", "-i", &args.network, "-j", "ACCEPT"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
-        let _ = Command::new("iptables")
-            .args(["-A", "FORWARD", "-o", &args.network, "-j", "ACCEPT"])
+
+        if fwd_in.map_or(true, |s| !s.success()) {
+            let _ = Command::new("iptables")
+                .args(["-A", "FORWARD", "-i", &args.network, "-j", "ACCEPT"])
+                .status();
+        }
+
+        let fwd_out = Command::new("iptables")
+            .args(["-C", "FORWARD", "-o", &args.network, "-j", "ACCEPT"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
+
+        if fwd_out.map_or(true, |s| !s.success()) {
+            let _ = Command::new("iptables")
+                .args(["-A", "FORWARD", "-o", &args.network, "-j", "ACCEPT"])
+                .status();
+        }
 
         for port_mapping in &args.ports {
             let parts: Vec<&str> = port_mapping.split(':').collect();
@@ -268,6 +310,15 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
     write(writer, b"done").ok();
     println!("[Nucleus] Network links established. Handing over control.");
 
+    // If running in detached mode, output confirmation and return immediately
+    if args.detach {
+        println!(
+            "[Nucleus] Container '{}' started in detached mode (PID: {}).",
+            args.name, pid
+        );
+        return Ok(());
+    }
+
     // Signal Forwarding: Catch SIGINT/SIGTERM and forward to child
     use nix::sys::signal::{self, SigSet, Signal};
     let mut sigset = SigSet::empty();
@@ -290,19 +341,43 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
     let status = child.wait().context("Container process failed")?;
 
     // 8. Cleanup
-    println!("[Nucleus] Cleaning up resources...");
-    let _ = crate::state::remove_state(&args.name);
-    if !args.rootless {
+    teardown_container(&args.name, &v_host, &args.ports, &container_ip, args.rootless)?;
+
+    println!(
+        "[Nucleus] Container '{}' terminated (Status: {})",
+        args.name, status
+    );
+    Ok(())
+}
+
+pub fn teardown_container(
+    name: &str,
+    v_host: &str,
+    ports: &[String],
+    container_ip: &str,
+    rootless: bool,
+) -> Result<()> {
+    println!("[Nucleus] Cleaning up resources for '{}'...", name);
+    let _ = crate::state::remove_state(name);
+
+    let cgroup_path = format!("/sys/fs/cgroup/{}", name);
+    if !rootless {
         let _ = fs::remove_dir_all(&cgroup_path);
     }
-    let _ = fs::remove_dir_all(format!("./temp/{}", args.name));
 
-    if !args.rootless {
+    // Remove runtime container merged/upper/work layers
+    let runtime_dir = get_nucleus_runtime_dir();
+    let _ = fs::remove_dir_all(runtime_dir.join("containers").join(name));
+    let _ = fs::remove_dir_all(format!("./temp/{}", name));
+
+    if !rootless {
         let _ = Command::new("ip")
-            .args(["link", "delete", &v_host])
+            .args(["link", "delete", v_host])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
 
-        for port_mapping in &args.ports {
+        for port_mapping in ports {
             let parts: Vec<&str> = port_mapping.split(':').collect();
             if parts.len() == 2 {
                 let host_port = parts[0];
@@ -314,7 +389,7 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
                         "-p",
                         "tcp",
                         "-d",
-                        &container_ip,
+                        container_ip,
                         "--dport",
                         container_port,
                         "-m",
@@ -324,6 +399,8 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
                         "-j",
                         "ACCEPT",
                     ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
                 let _ = Command::new("iptables")
                     .args([
@@ -340,15 +417,12 @@ pub fn run_parent_orchestrator(args: RunArgs) -> Result<()> {
                         "--to-destination",
                         &format!("{}:{}", container_ip, container_port),
                     ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
             }
         }
     }
-
-    println!(
-        "[Nucleus] Container '{}' terminated (Status: {})",
-        args.name, status
-    );
     Ok(())
 }
 

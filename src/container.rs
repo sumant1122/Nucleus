@@ -1,4 +1,5 @@
 use crate::args::RunArgs;
+use crate::utils::{get_nucleus_data_dir, get_nucleus_runtime_dir};
 use anyhow::{Context, Result};
 use caps::{CapSet, Capability};
 use libseccomp::*;
@@ -8,8 +9,9 @@ use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, chdir, execvp, fork, getgid, getuid, pivot_root, read, sethostname};
 use std::ffi::CString;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::os::unix::io::RawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Child Context: Isolates itself and prepares the container environment.
 pub fn run_container_child(args: RunArgs) -> Result<()> {
@@ -37,7 +39,7 @@ pub fn run_container_child(args: RunArgs) -> Result<()> {
 
     unshare(clone_flags).context("Failed to isolate other namespaces")?;
 
-    // 3. Fork into the new PID namespace
+    // 3. Fork into the new PID namespace so target process runs as PID 1
     match unsafe { fork() }.context("Failed to fork after unshare")? {
         ForkResult::Parent { child } => {
             match waitpid(child, None).context("Failed to wait for child PID 1")? {
@@ -95,17 +97,17 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
 
     sethostname(&args.name).ok();
 
-    let cwd = std::env::current_dir().context("Failed to get current dir")?;
-    let rootfs_path = cwd.join(crate::image::IMAGES_DIR).join(&args.image);
-    if !rootfs_path.exists() {
-        return Err(anyhow::anyhow!(
-            "Image '{}' not found in {}. Please run 'Nucleus pull {}' first.",
+    // Resolve base image rootfs path
+    let rootfs_path = crate::image::resolve_image_path(&args.image).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Image '{}' not found. Please run 'Nucleus pull {}' first.",
             args.image,
-            crate::image::IMAGES_DIR,
             args.image
-        ));
-    }
-    let root_base = cwd.join("temp").join(&args.name);
+        )
+    })?;
+
+    let runtime_dir = get_nucleus_runtime_dir();
+    let root_base = runtime_dir.join("containers").join(&args.name);
     let _ = fs::remove_dir_all(&root_base);
     let upper = root_base.join("upper");
     let work = root_base.join("work");
@@ -115,12 +117,17 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
     fs::create_dir_all(&work).context("Failed to create work dir")?;
     fs::create_dir_all(&merged).context("Failed to create merged dir")?;
 
-    let overlay_opts = format!(
+    let mut overlay_opts = format!(
         "lowerdir={},upperdir={},workdir={}",
         rootfs_path.to_str().context("Invalid rootfs path")?,
         upper.to_str().context("Invalid upper path")?,
         work.to_str().context("Invalid work path")?
     );
+
+    if args.rootless {
+        overlay_opts.push_str(",userxattr");
+    }
+
     mount(
         Some("overlay"),
         &merged,
@@ -145,8 +152,8 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
             let host_path = if host_part.starts_with('/') || host_part.starts_with('.') {
                 Path::new(host_part).to_path_buf()
             } else {
-                // Named volume
-                let vol_dir = Path::new("/tmp/nucleus/volumes").join(host_part);
+                // Named volume in centralized data dir
+                let vol_dir = get_nucleus_data_dir().join("volumes").join(host_part);
                 fs::create_dir_all(&vol_dir).context("Failed to create named volume dir")?;
                 vol_dir
             };
@@ -184,47 +191,94 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
         .context("Failed to unmount old root")?;
     fs::remove_dir(old_root_path_in_container.as_str()).ok();
 
+    // 1. Mount /proc
     fs::create_dir_all("/proc").ok();
     let _ = mount(
         Some("proc"),
         "/proc",
         Some("proc"),
-        MsFlags::empty(),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
         None::<&str>,
     );
-    fs::create_dir_all("/etc").ok();
 
+    // 2. Mount /sys
     fs::create_dir_all("/sys").ok();
     let _ = mount(
         Some("sysfs"),
         "/sys",
         Some("sysfs"),
-        MsFlags::empty(),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_RDONLY,
         None::<&str>,
     );
 
+    // 3. Mount /sys/fs/cgroup
     fs::create_dir_all("/sys/fs/cgroup").ok();
     let _ = mount(
         Some("cgroup2"),
         "/sys/fs/cgroup",
         Some("cgroup2"),
-        MsFlags::empty(),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
         None::<&str>,
     );
 
-    let resolv_conf = "/etc/resolv.conf";
-    if Path::new(resolv_conf).exists() {
-        fs::File::create(resolv_conf).ok();
-        mount(
-            Some(resolv_conf),
-            resolv_conf,
-            None::<&str>,
-            MsFlags::MS_BIND | MsFlags::MS_RDONLY,
-            None::<&str>,
-        )
-        .context("Failed to bind mount resolv.conf")?;
+    // 4. Mount /dev tmpfs and setup standard device nodes
+    fs::create_dir_all("/dev").ok();
+    let _ = mount(
+        Some("tmpfs"),
+        "/dev",
+        Some("tmpfs"),
+        MsFlags::MS_NOSUID | MsFlags::MS_STRICTATIME,
+        Some("mode=755"),
+    );
+
+    let dev_nodes = ["null", "zero", "full", "random", "urandom", "tty"];
+    for node in &dev_nodes {
+        let target = format!("/dev/{}", node);
+        let _ = fs::File::create(&target);
+        let host_node = format!("/dev/{}", node);
+        if Path::new(&host_node).exists() {
+            let _ = mount(
+                Some(host_node.as_str()),
+                target.as_str(),
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            );
+        }
     }
 
+    fs::create_dir_all("/dev/pts").ok();
+    let _ = mount(
+        Some("devpts"),
+        "/dev/pts",
+        Some("devpts"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
+        Some("newinstance,ptmxmode=0666,mode=0620"),
+    );
+
+    fs::create_dir_all("/dev/shm").ok();
+    let _ = mount(
+        Some("shm"),
+        "/dev/shm",
+        Some("tmpfs"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+        Some("mode=1777,size=65536k"),
+    );
+
+    let _ = symlink("/proc/self/fd", "/dev/fd");
+    let _ = symlink("/proc/self/fd/0", "/dev/stdin");
+    let _ = symlink("/proc/self/fd/1", "/dev/stdout");
+    let _ = symlink("/proc/self/fd/2", "/dev/stderr");
+    let _ = symlink("/dev/pts/ptmx", "/dev/ptmx");
+
+    // 5. Setup DNS (/etc/resolv.conf)
+    fs::create_dir_all("/etc").ok();
+    let resolv_conf = "/etc/resolv.conf";
+    let _ = fs::remove_file(resolv_conf);
+    let dns_content = "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 8.8.4.4\n";
+    let _ = fs::write(resolv_conf, dns_content);
+
+    // 6. Read-only RootFS
     if args.readonly {
         println!("[Container] Remounting root filesystem as read-only...");
         mount(
@@ -237,6 +291,10 @@ fn setup_container_env(args: RunArgs) -> Result<()> {
         .context("Failed to remount / as read-only")?;
     }
 
+    // 7. Security Hardening: PR_SET_NO_NEW_PRIVS, Capabilities & Seccomp
+    unsafe {
+        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    }
     drop_capabilities()?;
     apply_seccomp_filter()?;
 

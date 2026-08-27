@@ -14,7 +14,8 @@ fn test_container_lifecycle() {
     }
 
     let container_name = "test-integration-box";
-    let state_path = format!("/tmp/nucleus/state/{}.json", container_name);
+    let state_path = format!("/run/nucleus/state/{}.json", container_name);
+    let legacy_state_path = format!("/tmp/nucleus/state/{}.json", container_name);
     let cgroup_path = format!("/sys/fs/cgroup/{}", container_name);
 
     // 1. Cleanup previous runs
@@ -22,6 +23,7 @@ fn test_container_lifecycle() {
         .args(["stop", container_name])
         .status();
     let _ = fs::remove_file(&state_path);
+    let _ = fs::remove_file(&legacy_state_path);
 
     // 2. Start a container in detached mode
     // We use a simple sleep command so it stays alive
@@ -42,7 +44,10 @@ fn test_container_lifecycle() {
     thread::sleep(Duration::from_millis(500));
 
     // 3. Verify State exists
-    assert!(Path::new(&state_path).exists(), "State file was not created");
+    assert!(
+        Path::new(&state_path).exists() || Path::new(&legacy_state_path).exists(),
+        "State file was not created"
+    );
 
     // 4. Verify Cgroup exists
     assert!(Path::new(&cgroup_path).exists(), "Cgroup directory was not created");
@@ -69,7 +74,7 @@ fn test_container_lifecycle() {
     thread::sleep(Duration::from_millis(500));
 
     // 7. Verify Cleanup
-    assert!(!Path::new(&state_path).exists(), "State file was not cleaned up");
+    assert!(!Path::new(&state_path).exists() && !Path::new(&legacy_state_path).exists(), "State file was not cleaned up");
     assert!(!Path::new(&cgroup_path).exists(), "Cgroup was not cleaned up");
 }
 
