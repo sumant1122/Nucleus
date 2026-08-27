@@ -1,9 +1,10 @@
+use crate::utils::get_nucleus_runtime_dir;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ContainerState {
     pub name: String,
     pub pid: u32,
@@ -13,10 +14,8 @@ pub struct ContainerState {
     pub status: String,
 }
 
-const STATE_DIR: &str = "/tmp/nucleus/state";
-
-fn get_state_dir() -> PathBuf {
-    PathBuf::from(STATE_DIR)
+pub fn get_state_dir() -> PathBuf {
+    get_nucleus_runtime_dir().join("state")
 }
 
 pub fn save_state(state: &ContainerState) -> Result<()> {
@@ -32,34 +31,56 @@ pub fn save_state(state: &ContainerState) -> Result<()> {
 }
 
 pub fn remove_state(name: &str) -> Result<()> {
+    // Check primary runtime state dir
     let state_path = get_state_dir().join(format!("{}.json", name));
     if state_path.exists() {
-        fs::remove_file(state_path).context("Failed to remove container state file")?;
+        let _ = fs::remove_file(state_path);
+    }
+    // Also cleanup legacy /tmp/nucleus/state if present
+    let legacy_path = PathBuf::from("/tmp/nucleus/state").join(format!("{}.json", name));
+    if legacy_path.exists() {
+        let _ = fs::remove_file(legacy_path);
     }
     Ok(())
 }
 
+pub fn get_container_state(name: &str) -> Result<Option<ContainerState>> {
+    let containers = list_containers()?;
+    Ok(containers.into_iter().find(|c| c.name == name))
+}
+
 pub fn list_containers() -> Result<Vec<ContainerState>> {
-    let state_dir = get_state_dir();
-    if !state_dir.exists() {
-        return Ok(vec![]);
-    }
+    let state_dirs = vec![
+        get_state_dir(),
+        PathBuf::from("/tmp/nucleus/state"),
+    ];
 
     let mut containers = vec![];
-    for entry in fs::read_dir(state_dir).context("Failed to read state directory")? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "json") {
-            let content = fs::read_to_string(&path).context("Failed to read state file")?;
-            let state: ContainerState = serde_json::from_str(&content)
-                .context(format!("Failed to parse state file: {:?}", path))?;
+    let mut seen_names = std::collections::HashSet::new();
 
-            // Basic liveness check: check if PID still exists
-            if Path::new(&format!("/proc/{}", state.pid)).exists() {
-                containers.push(state);
-            } else {
-                // Cleanup stale state
-                let _ = fs::remove_file(path);
+    for state_dir in state_dirs {
+        if !state_dir.exists() {
+            continue;
+        }
+
+        if let Ok(entries) = fs::read_dir(&state_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "json") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if let Ok(state) = serde_json::from_str::<ContainerState>(&content) {
+                            if seen_names.insert(state.name.clone()) {
+                                // Liveness check: check if PID still exists
+                                if Path::new(&format!("/proc/{}", state.pid)).exists() {
+                                    containers.push(state);
+                                } else {
+                                    // Cleanup stale state
+                                    let _ = fs::remove_file(&path);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

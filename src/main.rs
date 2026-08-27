@@ -6,14 +6,15 @@ mod state;
 mod stats;
 mod utils;
 
-use crate::args::{Commands, OxideArgs};
+use crate::args::{Commands, NucleusArgs};
+use crate::utils::get_nucleus_log_dir;
 use anyhow::{Context, Result};
 use clap::Parser;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{Pid, getuid};
 
 fn main() -> Result<()> {
-    let args = OxideArgs::parse();
+    let args = NucleusArgs::parse();
 
     // Command Dispatch
     match args.command {
@@ -41,15 +42,27 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::Logs { name, follow }) => {
-            let log_path = format!("/tmp/nucleus/logs/{}.log", name);
-            if !std::path::Path::new(&log_path).exists() {
-                println!("[Nucleus] No logs found for container '{}'.", name);
-                return Ok(());
+            let log_dirs = vec![get_nucleus_log_dir(), std::path::PathBuf::from("/tmp/nucleus/logs")];
+            let mut resolved_log_path = None;
+            for dir in log_dirs {
+                let p = dir.join(format!("{}.log", name));
+                if p.exists() {
+                    resolved_log_path = Some(p);
+                    break;
+                }
             }
+
+            let log_path = match resolved_log_path {
+                Some(p) => p,
+                None => {
+                    println!("[Nucleus] No logs found for container '{}'.", name);
+                    return Ok(());
+                }
+            };
 
             if follow {
                 std::process::Command::new("tail")
-                    .args(["-f", &log_path])
+                    .args(["-f", log_path.to_str().unwrap_or("")])
                     .status()
                     .context("Failed to tail log file")?;
             } else {
@@ -62,9 +75,9 @@ fn main() -> Result<()> {
             let containers = state::list_containers()?;
             if let Some(c) = containers.iter().find(|c| c.name == name) {
                 println!("[Nucleus] Stopping container '{}' (PID {})...", name, c.pid);
-                signal::kill(Pid::from_raw(c.pid as i32), Signal::SIGTERM)
-                    .context("Failed to send SIGTERM to container")?;
-                // State will be cleaned up by the orchestrator or next 'list' call
+                let _ = signal::kill(Pid::from_raw(c.pid as i32), Signal::SIGTERM);
+                let _ = orchestrator::teardown_container(&c.name, &c.veth_host, &[], &c.ip, false);
+                println!("[Nucleus] Container '{}' stopped.", name);
             } else {
                 println!("[Nucleus] Container '{}' not found.", name);
             }
