@@ -59,6 +59,11 @@ jobs:
         env:
           PKG_CONFIG_ALLOW_CROSS: 1
           PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
+          # The aarch64 target spec passes `--fix-cortex-a53-843419` as a
+          # pre-link argument. rust-lld rejects it when running on an x86_64
+          # host ("only supported on AArch64"), so the real cross linker must be
+          # used, which accepts it because its underlying ld targets AArch64.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package
         run: |
