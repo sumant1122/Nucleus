@@ -655,12 +655,16 @@ fn setup_pseudo_filesystems(rootless: bool) -> Result<()> {
 
 /// Establishes a controlling terminal for the container process.
 ///
-/// With `--tty` the orchestrator hands us the slave side of a pty pair and
-/// makes it stdin/stdout/stderr; we then acquire it as the controlling tty.
-/// Without `--tty` we only adopt an inherited terminal, if there is one.
+/// Nucleus does not allocate a pseudo-terminal: there is no `openpty` call
+/// anywhere in the codebase. `--tty` therefore only asserts that an inherited
+/// terminal exists and asks for `TERM=xterm`; when the container is started
+/// without a controlling terminal the flag is rejected rather than silently
+/// ignored. Allocating a pty pair and proxying it from the orchestrator is not
+/// implemented yet.
 fn setup_controlling_terminal(args: &RunArgs) -> Result<()> {
-    // SAFETY: setsid() takes no arguments and only fails if already a session
-    // leader, in which case the controlling terminal is already set below.
+    // SAFETY: setsid() takes no arguments and only fails if the process is
+    // already a session leader, in which case the controlling terminal is
+    // acquired by the ioctl below regardless.
     unsafe {
         libc::setsid();
     }
@@ -675,7 +679,10 @@ fn setup_controlling_terminal(args: &RunArgs) -> Result<()> {
     }
 
     if args.tty && !is_tty {
-        bail!("--tty requires a pseudo-terminal; run from an interactive terminal");
+        bail!(
+            "--tty requires an inherited pseudo-terminal, and Nucleus does not allocate one yet; \
+             run from an interactive terminal or drop the flag"
+        );
     }
     Ok(())
 }

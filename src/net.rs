@@ -293,6 +293,106 @@ fn iptables(args: &[String]) -> Result<()> {
     run_command("iptables", &borrowed)
 }
 
+/// Name of the filter chain Nucleus owns.
+pub const CHAIN_FORWARD: &str = "NUCLEUS-FORWARD";
+/// Name of the nat PREROUTING chain Nucleus owns.
+pub const CHAIN_PREROUTING: &str = "NUCLEUS-PREROUTING";
+/// Name of the nat POSTROUTING chain Nucleus owns.
+pub const CHAIN_POSTROUTING: &str = "NUCLEUS-POSTROUTING";
+
+/// Every chain Nucleus creates, with the table it lives in.
+pub const OWNED_CHAINS: &[(&str, &str)] = &[
+    ("filter", CHAIN_FORWARD),
+    ("nat", CHAIN_PREROUTING),
+    ("nat", CHAIN_POSTROUTING),
+];
+
+/// Returns true when a chain exists in the given table.
+pub fn chain_exists(table: &str, chain: &str) -> bool {
+    Command::new("iptables")
+        .args(["-t", table, "-S", chain])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Creates the Nucleus chains and hooks them into the built-in chains.
+///
+/// Rules are kept out of `FORWARD`, `PREROUTING` and `POSTROUTING` so that
+/// Nucleus never competes with the host firewall: there is a single jump per
+/// built-in chain, it is inserted at the top so container traffic is seen
+/// first, and everything Nucleus owns is confined to three named chains that
+/// can be inspected or flushed in one place.
+pub fn ensure_chains() -> Result<()> {
+    for (table, chain) in OWNED_CHAINS {
+        if !chain_exists(table, chain) {
+            let created = iptables(&[s("-t"), (*table).to_string(), s("-N"), (*chain).to_string()]);
+            if let Err(e) = created {
+                // A concurrent invocation may have created it first.
+                if !chain_exists(table, chain) {
+                    return Err(e).with_context(|| {
+                        format!("Failed to create iptables chain {chain} in table {table}")
+                    });
+                }
+            }
+        }
+    }
+
+    // One jump per built-in chain, inserted at the head so that DNAT is applied
+    // before any host policy can drop the packet.
+    for (table, chain, builtin) in [
+        ("filter", CHAIN_FORWARD, "FORWARD"),
+        ("nat", CHAIN_PREROUTING, "PREROUTING"),
+        ("nat", CHAIN_POSTROUTING, "POSTROUTING"),
+    ] {
+        let jump = [
+            s("-t"),
+            table.to_string(),
+            s("-C"),
+            builtin.to_string(),
+            s("-j"),
+            chain.to_string(),
+        ];
+        if try_command(
+            "iptables",
+            &jump.iter().map(String::as_str).collect::<Vec<_>>(),
+        ) {
+            continue;
+        }
+        let mut insert = vec![
+            s("-t"),
+            table.to_string(),
+            s("-I"),
+            builtin.to_string(),
+            s("1"),
+        ];
+        insert.extend_from_slice(&[s("-j"), chain.to_string()]);
+        iptables(&insert).with_context(|| {
+            format!("Failed to hook {chain} into {builtin}; container networking will not work")
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Flushes every rule from the Nucleus chains, leaving the chains in place.
+///
+/// Intended for recovering a host after an unclean shutdown; it does not remove
+/// the hooks, so the next `nucleus run` works without further setup.
+pub fn flush_chains() -> Result<()> {
+    for (table, chain) in OWNED_CHAINS {
+        if !chain_exists(table, chain) {
+            continue;
+        }
+        // -F flushes the chain but leaves it linked from the built-in chain.
+        let args = vec![s("-t"), (*table).to_string(), s("-F"), (*chain).to_string()];
+        iptables(&args).with_context(|| format!("Failed to flush chain {chain}"))?;
+    }
+    Ok(())
+}
+
 /// Adds an iptables rule only if an identical rule is not already present.
 pub fn ensure_iptables_rule(args: &[String]) -> Result<()> {
     let mut check = Vec::with_capacity(args.len() + 1);
@@ -331,7 +431,7 @@ pub fn ensure_host_nat(subnet: &Ipv4Net, bridge: &str) -> Result<()> {
     ensure_iptables_rule(&[
         s("-t"),
         s("nat"),
-        s("POSTROUTING"),
+        s(CHAIN_POSTROUTING),
         s("-s"),
         subnet_cidr,
         s("!"),
@@ -340,10 +440,23 @@ pub fn ensure_host_nat(subnet: &Ipv4Net, bridge: &str) -> Result<()> {
         s("-j"),
         s("MASQUERADE"),
     ])?;
-    ensure_iptables_rule(&[s("-i"), bridge.to_string(), s("-j"), s("ACCEPT")])?;
-    ensure_iptables_rule(&[s("-o"), bridge.to_string(), s("-j"), s("ACCEPT")])?;
+    ensure_iptables_rule(&[
+        s(CHAIN_FORWARD),
+        s("-i"),
+        bridge.to_string(),
+        s("-j"),
+        s("ACCEPT"),
+    ])?;
+    ensure_iptables_rule(&[
+        s(CHAIN_FORWARD),
+        s("-o"),
+        bridge.to_string(),
+        s("-j"),
+        s("ACCEPT"),
+    ])?;
     // Allow container-to-container traffic within the bridge.
     ensure_iptables_rule(&[
+        s(CHAIN_FORWARD),
         s("-i"),
         bridge.to_string(),
         s("-o"),
@@ -370,8 +483,8 @@ fn port_match(mapping: &PortMapping, port: u16, dest_ip: Option<&str>) -> Vec<St
 pub fn publish_port(mapping: &PortMapping, container_ip: &str) -> Result<()> {
     let destination = format!("{container_ip}:{}", mapping.container_port);
 
-    // Accept the DNATed traffic in the forward chain.
-    let mut forward = vec![s("FORWARD")];
+    // Accept the DNATed traffic in the chain Nucleus owns.
+    let mut forward = vec![s(CHAIN_FORWARD)];
     forward.extend(port_match(
         mapping,
         mapping.container_port,
@@ -388,7 +501,7 @@ pub fn publish_port(mapping: &PortMapping, container_ip: &str) -> Result<()> {
     ensure_iptables_rule(&forward)?;
 
     // Rewrite the destination address on the way in.
-    let mut dnat = vec![s("-t"), s("nat"), s("PREROUTING")];
+    let mut dnat = vec![s("-t"), s("nat"), s(CHAIN_PREROUTING)];
     dnat.extend(port_match(
         mapping,
         mapping.host_port,
@@ -403,7 +516,7 @@ pub fn publish_port(mapping: &PortMapping, container_ip: &str) -> Result<()> {
 pub fn unpublish_port(mapping: &PortMapping, container_ip: &str) {
     let destination = format!("{container_ip}:{}", mapping.container_port);
 
-    let mut forward = vec![s("-D"), s("FORWARD")];
+    let mut forward = vec![s("-D"), s(CHAIN_FORWARD)];
     forward.extend(port_match(
         mapping,
         mapping.container_port,
@@ -419,7 +532,7 @@ pub fn unpublish_port(mapping: &PortMapping, container_ip: &str) {
     ]);
     remove_iptables_rule(&forward);
 
-    let mut dnat = vec![s("-t"), s("nat"), s("-D"), s("PREROUTING")];
+    let mut dnat = vec![s("-t"), s("nat"), s("-D"), s(CHAIN_PREROUTING)];
     dnat.extend(port_match(
         mapping,
         mapping.host_port,

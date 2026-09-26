@@ -144,6 +144,22 @@ sudo Nucleus exec my-shell -- /bin/sh  # run a command inside a running containe
 sudo Nucleus stats my-shell --stream  # live CPU / memory / swap / PIDs
 ```
 
+### Checking host support
+
+Nucleus is built directly on kernel primitives, so what it can do depends on the
+host. `nucleus info` reports that up front:
+
+```bash
+Nucleus info            # human-readable report
+Nucleus info --json     # for scripting
+```
+
+It probes cgroup v2 (and whether the tree is writable), OverlayFS, unprivileged
+user namespaces, whether a seccomp filter can actually be loaded, the iptables
+backend, `ip_forward` writability, effective capabilities, required host tools and
+the resolved directory layout. It exits non-zero when neither privileged nor
+rootless mode is usable, so it works as a provisioning check or a health check.
+
 ### Images
 
 ```bash
@@ -188,6 +204,31 @@ limitations:
   fresh kernel instances, because the kernel forbids mounting a new procfs inside a
   user namespace when the host's `/proc` is not fully visible. Some host `/proc` detail
   is therefore visible inside the container.
+
+## Networking and the Host Firewall
+
+Nucleus never writes rules directly into the host's `FORWARD`, `PREROUTING` or
+`POSTROUTING` chains. Instead it owns three chains and inserts a single jump into
+each built-in chain, at the head so container traffic is seen first:
+
+| Table | Chain |
+| :--- | :--- |
+| `filter` | `NUCLEUS-FORWARD` |
+| `nat` | `NUCLEUS-PREROUTING` |
+| `nat` | `NUCLEUS-POSTROUTING` |
+
+This keeps Nucleus from competing with `firewalld` or `ufw`, and means everything
+it installed can be inspected in one place:
+
+```bash
+sudo iptables -t nat -S NUCLEUS-PREROUTING
+```
+
+To recover a host after an unclean shutdown:
+
+```bash
+sudo Nucleus flush-firewall    # empties the three chains, leaves them hooked
+```
 
 ## Security Notes
 
@@ -236,6 +277,8 @@ implementation of the underlying mechanisms.
 | `state.rs` | Container state persistence, atomic writes, liveness detection |
 | `image.rs` | Image registry, download, atomic extraction |
 | `stats.rs` | cgroup-based resource statistics |
+| `doctor.rs` | Host capability probing for `nucleus info` |
+| `properties.rs` | Property-based tests for the input parsers |
 | `utils.rs` | Name and path validation, memory parsing, directory layout |
 
 ## Development
@@ -243,10 +286,15 @@ implementation of the underlying mechanisms.
 ```bash
 just build         # release build
 just check         # fmt --check + clippy -D warnings (no side effects)
-just test          # unit + integration tests
+just test          # unit + property + integration tests
 just ci            # everything CI runs
 just test-integration   # lifecycle tests, run with sudo
 ```
+
+The input parsers that form the security boundary — container names, volume
+destinations, port mappings, subnets and memory strings — are covered by
+property-based tests asserting that any input either errors or yields a value
+satisfying the safety invariant. Two real normalisation bugs were found this way.
 
 The unit and CLI tests run unprivileged. The container lifecycle tests need root and
 self-skip otherwise; CI runs them in a separate non-blocking job.

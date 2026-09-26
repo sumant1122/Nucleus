@@ -59,6 +59,14 @@ pub enum Commands {
     Ps,
     /// List local images
     Images,
+    /// Report the host capabilities Nucleus depends on
+    Info {
+        /// Emit the report as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove all rules from the Nucleus iptables chains
+    FlushFirewall,
     /// Remove a local image
     Rmi {
         /// Name of the image to remove
@@ -162,7 +170,7 @@ pub struct RunArgs {
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
-    /// Allocate a pseudo-TTY
+    /// Require an inherited pseudo-terminal (Nucleus does not allocate a pty yet)
     #[arg(short = 't', long)]
     pub tty: bool,
 

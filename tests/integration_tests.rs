@@ -572,3 +572,103 @@ fn runtime_containers_dir() -> std::path::PathBuf {
         });
     base.join("nucleus").join("containers")
 }
+
+// ---------------------------------------------------------------------------
+// `nucleus info`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_info_reports_host_capabilities() {
+    let output = nucleus(&["info"]);
+    let text = combined(&output);
+
+    // The report must cover the kernel features Nucleus depends on.
+    for probe in [
+        "kernel",
+        "identity",
+        "cgroup v2",
+        "OverlayFS",
+        "user namespaces",
+        "seccomp",
+        "iptables",
+        "iproute2",
+    ] {
+        assert!(
+            text.contains(probe),
+            "info report missing '{probe}':\n{text}"
+        );
+    }
+
+    // A verdict for each mode must always be present.
+    assert!(
+        text.contains("Privileged mode:"),
+        "no privileged verdict:\n{text}"
+    );
+    assert!(
+        text.contains("Rootless mode:"),
+        "no rootless verdict:\n{text}"
+    );
+}
+
+#[test]
+fn test_info_json_is_valid_and_consistent() {
+    let output = nucleus(&["info", "--json"]);
+    let json = stdout_of(&output);
+
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or_else(|e| panic!("info --json not valid JSON ({e}): {json}"));
+
+    assert!(parsed["privileged_available"].is_boolean());
+    assert!(parsed["rootless_available"].is_boolean());
+
+    let probes = parsed["probes"]
+        .as_array()
+        .expect("probes must be an array");
+    assert!(
+        probes.len() >= 10,
+        "expected a substantial report, got {probes:?}"
+    );
+
+    for probe in probes {
+        for field in ["name", "status", "detail"] {
+            assert!(
+                probe.get(field).is_some(),
+                "probe is missing '{field}': {probe:?}"
+            );
+        }
+        let status = probe["status"].as_str().unwrap_or_default();
+        assert!(
+            ["INFO", "WARN", "FAIL"].contains(&status),
+            "unexpected status {status:?}"
+        );
+    }
+}
+
+#[test]
+fn test_info_exit_code_signals_usability() {
+    let output = nucleus(&["info"]);
+
+    // On a host where neither mode works the command must fail, so it can be
+    // used as a provisioning or health check.
+    let usable = combined(&output).contains("Rootless mode:   available")
+        || combined(&output).contains("Privileged mode: available");
+    if usable {
+        assert!(output.status.success(), "info should exit 0 when usable");
+    } else {
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "info should exit 1 when neither mode is usable"
+        );
+    }
+}
+
+#[test]
+fn test_flush_firewall_requires_root() {
+    if is_root() {
+        return;
+    }
+    let output = nucleus(&["flush-firewall"]);
+    assert!(!output.status.success());
+    assert!(combined(&output).contains("root"));
+}

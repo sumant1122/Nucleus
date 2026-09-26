@@ -203,7 +203,7 @@ pub fn parse_volume(spec: &str) -> Result<Volume> {
         bail!("invalid volume '{spec}': expected 'source:destination' or 'source:destination:ro'");
     }
 
-    let source = parts[0].trim();
+    let source = trim_ascii(parts[0]);
     if source.is_empty() {
         bail!("invalid volume '{spec}': source must not be empty");
     }
@@ -231,13 +231,24 @@ pub fn parse_volume(spec: &str) -> Result<Volume> {
     })
 }
 
+/// Trims ASCII whitespace only.
+///
+/// `str::trim` also strips Unicode whitespace such as U+2000, which makes
+/// normalisation non-idempotent: a path ending in an ideographic space is
+/// transformed differently the second time it is passed through, so the value
+/// that was validated and the value that gets used can disagree. ASCII
+/// trimming is stable.
+fn trim_ascii(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_ascii_whitespace())
+}
+
 /// Normalizes a user-supplied container path into a safe relative path.
 ///
 /// Rejects `..` traversal, NUL bytes, and paths that resolve to the container
 /// root, so the result can never escape the container's merged rootfs when
 /// joined onto it.
 pub fn normalize_container_path(raw: &str) -> Result<String> {
-    let trimmed = raw.trim();
+    let trimmed = trim_ascii(raw);
     if trimmed.is_empty() {
         bail!("container path must not be empty");
     }
@@ -250,7 +261,20 @@ pub fn normalize_container_path(raw: &str) -> Result<String> {
         match component {
             "" | "." => continue,
             ".." => bail!("container path '{raw}' must not contain '..' components"),
-            c => components.push(c),
+            c => {
+                // A component with surrounding whitespace is rejected rather
+                // than trimmed. Trimming it here would make normalisation
+                // non-idempotent - the orchestrator validates a path, passes the
+                // normalised form to the child, and the child normalises it
+                // again - so the destination actually mounted could differ from
+                // the one that was checked.
+                if trim_ascii(c) != c {
+                    bail!(
+                        "container path '{raw}' has a component with leading or trailing whitespace: '{c}'"
+                    );
+                }
+                components.push(c)
+            }
         }
     }
 
@@ -266,7 +290,7 @@ pub fn parse_env_assignment(spec: &str) -> Result<(String, String)> {
     let (key, value) = spec
         .split_once('=')
         .ok_or_else(|| anyhow!("invalid environment variable '{spec}': expected 'KEY=VALUE'"))?;
-    let key = key.trim();
+    let key = trim_ascii(key);
     if key.is_empty() {
         bail!("invalid environment variable '{spec}': key must not be empty");
     }
@@ -430,6 +454,33 @@ mod tests {
         assert!(normalize_container_path("..").is_err());
         assert!(normalize_container_path("/").is_err());
         assert!(normalize_container_path("").is_err());
+    }
+
+    #[test]
+    fn test_normalize_container_path_rejects_padded_components() {
+        // Trimming these would make normalisation non-idempotent, so the value
+        // the child mounts could differ from the one that was validated.
+        for path in ["! /", "/data /sub", "data\u{2000}", "  /data", "/data  "] {
+            let result = normalize_container_path(path);
+            if let Ok(normalized) = &result {
+                // If it was accepted, re-normalising must be a no-op.
+                let again = normalize_container_path(normalized)
+                    .unwrap_or_else(|e| panic!("{path:?} was accepted as {normalized:?} but rejected on re-normalisation: {e}"));
+                assert_eq!(again, *normalized, "{path:?} normalised non-idempotently");
+            }
+        }
+        // Unambiguously padded components are rejected outright.
+        assert!(normalize_container_path("/data /sub").is_err());
+        assert!(normalize_container_path("data /x").is_err());
+    }
+
+    #[test]
+    fn test_normalize_container_path_is_idempotent_for_accepted_input() {
+        for path in ["/data", "data/logs", "a/b/c", "-dash", "sp ace/inner"] {
+            let once = normalize_container_path(path).unwrap();
+            let twice = normalize_container_path(&once).unwrap();
+            assert_eq!(once, twice, "{path:?} was not idempotent");
+        }
     }
 
     #[test]

@@ -341,6 +341,9 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
     // 7. Port publishing
     if !args.rootless {
         net::enable_ip_forwarding()?;
+        // Claim our own chains before adding any rules, so nothing is ever
+        // written directly into the host's FORWARD/PREROUTING/POSTROUTING.
+        net::ensure_chains()?;
         net::ensure_host_nat(&subnet, &args.network)?;
         for mapping in &ports {
             publish_port(mapping, &container_ip)

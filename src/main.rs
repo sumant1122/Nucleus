@@ -1,8 +1,11 @@
 mod args;
 mod container;
+mod doctor;
 mod image;
 mod net;
 mod orchestrator;
+#[cfg(test)]
+mod properties;
 mod state;
 mod stats;
 mod utils;
@@ -65,6 +68,42 @@ fn main() -> Result<()> {
         }
         Some(Commands::Images) => {
             list_images()?;
+        }
+        Some(Commands::Info { json }) => {
+            let report = doctor::collect();
+            if json {
+                let payload = serde_json::json!({
+                    "privileged_available": report.privileged_ok,
+                    "rootless_available": report.rootless_ok,
+                    "probes": report.probes.iter().map(|p| serde_json::json!({
+                        "name": p.name,
+                        "status": format!("{:?}", p.status).to_uppercase(),
+                        "detail": p.detail,
+                    })).collect::<Vec<_>>(),
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{report}");
+            }
+            // Non-zero when neither mode can work, so this is usable in a
+            // provisioning script or a container-entrypoint health check.
+            if !report.privileged_ok && !report.rootless_ok {
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::FlushFirewall) => {
+            if !getuid().is_root() {
+                bail!("'nucleus flush-firewall' must be run as root");
+            }
+            net::flush_chains()?;
+            println!(
+                "[Nucleus] Flushed rules from: {}",
+                net::OWNED_CHAINS
+                    .iter()
+                    .map(|(table, chain)| format!("{table}/{chain}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         Some(Commands::Rmi { image }) => {
             image::remove_image(&image)?;

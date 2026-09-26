@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **`nucleus info`** reports the host capabilities Nucleus depends on: cgroup v2 and
+  whether the tree is writable, OverlayFS, unprivileged user namespaces, whether a
+  seccomp filter can actually be loaded (not merely whether the kernel has seccomp),
+  the iptables backend, `ip_forward` writability, effective capabilities, the required
+  host tools, the resolved directory layout and the local images. `--json` for
+  scripting. Exits non-zero when neither privileged nor rootless mode is usable, so
+  it works as a provisioning or health check.
+- **`nucleus flush-firewall`** empties the Nucleus iptables chains while leaving them
+  hooked, for recovering a host after an unclean shutdown.
+
+### Changed
+- **Nucleus no longer writes rules into the host's built-in firewall chains.** It owns
+  `NUCLEUS-FORWARD`, `NUCLEUS-PREROUTING` and `NUCLEUS-POSTROUTING`, and inserts a
+  single jump at the head of each corresponding built-in chain. This stops Nucleus
+  from competing with `firewalld`/`ufw` and gives operators one place to inspect or
+  flush everything it installed.
+
+### Fixed
+- **Container path normalisation is now idempotent.** Two bugs let the value the
+  orchestrator validated differ from the value the child actually mounted, because the
+  child re-normalises the spec it was handed:
+  - `str::trim` is Unicode-aware, so a path ending in U+2000 was trimmed on the second
+    pass but not the first. Trimming is now ASCII-only.
+  - A path component with surrounding whitespace (`/data /sub`) survived the first
+    pass and was stripped on the second. Such components are now rejected rather than
+    silently transformed, since trimming them would mount somewhere other than what was
+    checked.
+  Both were found by the new property tests, not by inspection.
+
+### Corrected
+- `--tty` no longer claims to allocate a pseudo-terminal. It never did: there is no
+  `openpty` call in the codebase, and a comment described behaviour that did not exist.
+  The flag now only asserts that an inherited terminal is present, says so in `--help`,
+  and explains the limitation when it rejects a run.
+
+### Tests
+- 93 tests, up from 67. Added `proptest`-based property tests for every input parser on
+  the security boundary, asserting that arbitrary input either errors or satisfies the
+  safety invariant — no panics, no silently-accepted unsafe values. Two of the parsers'
+  invariants had never been true before.
+- Added `nucleus info` and `flush-firewall` integration coverage, including the JSON
+  schema and the exit-code contract.
+- Failed property cases are recorded in `proptest-regressions/` and re-run on every
+  future run.
+
 ## [0.3.0] - 2026-09-26
 
 This release repairs the build breakage and resource leaks introduced in 0.2.0 and
