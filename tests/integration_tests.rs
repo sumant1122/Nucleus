@@ -542,11 +542,20 @@ fn test_detached_container_is_listed_then_reclaimed() {
         "sleep",
         "30",
     ]);
-    assert!(run.status.success(), "run failed: {}", combined(&run));
+    assert!(
+        run.status.success(),
+        "run failed: {}\ncontainer log:\n{}",
+        combined(&run),
+        read_container_log(name)
+    );
 
     // A detached container must be listed with its metadata.
     let list = stdout_of(&nucleus(&["list"]));
-    assert!(list.contains(name), "detached container not listed: {list}");
+    assert!(
+        list.contains(name),
+        "detached container not listed: {list}\ncontainer log:\n{}",
+        read_container_log(name)
+    );
     assert!(list.contains("10.0.0.96"), "IP missing from list: {list}");
 
     // Stopping it must reclaim state and the runtime directory.
@@ -671,4 +680,115 @@ fn test_flush_firewall_requires_root() {
     let output = nucleus(&["flush-firewall"]);
     assert!(!output.status.success());
     assert!(combined(&output).contains("root"));
+}
+
+/// Reads a detached container's log, so test failures are diagnosable.
+///
+/// Without this a container that dies during startup produces a bare
+/// "not listed" assertion with no indication of why.
+fn read_container_log(name: &str) -> String {
+    let base = std::env::var("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| {
+            std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let log = base.join("nucleus/logs").join(format!("{name}.log"));
+    std::fs::read_to_string(&log).unwrap_or_else(|e| format!("(no log at {}: {e})", log.display()))
+}
+
+#[test]
+fn test_detached_run_fails_when_the_command_cannot_start() {
+    // `run --detach` must not claim success for a container that cannot start.
+    // This is what made a CI failure undiagnosable: the error was buried in
+    // the log while the command exited 0.
+    let cases: [(&str, &str); 4] = [
+        ("missing", "/definitely-not-a-real-binary-xyz"),
+        ("directory", "/bin"),
+        ("non-executable", "/etc/hostname"),
+        ("root", "/"),
+    ];
+
+    for (label, command) in cases {
+        let name = format!("test-badcmd-{label}");
+        let _ = nucleus(&["rm", &name, "--force"]);
+
+        let run = nucleus(&["run", "--rootless", "--name", &name, "--detach", command]);
+        assert!(
+            !run.status.success(),
+            "`--detach {command}` should have failed, but exited 0"
+        );
+
+        let text = combined(&run);
+        assert!(
+            text.contains("failed to start"),
+            "expected a startup failure message for {label}, got: {text}"
+        );
+    }
+}
+
+#[test]
+fn test_failed_start_leaves_no_runtime_directory() {
+    let name = "test-badcmd-cleanup";
+    let _ = nucleus(&["rm", name, "--force"]);
+
+    let run = nucleus(&[
+        "run",
+        "--rootless",
+        "--name",
+        name,
+        "--detach",
+        "/definitely-not-a-real-binary-xyz",
+    ]);
+    assert!(!run.status.success(), "expected the run to fail");
+
+    // A container that never started must not leave anything behind.
+    let container_dir = runtime_containers_dir().join(name);
+    assert!(
+        !container_dir.exists(),
+        "failed start left {} behind",
+        container_dir.display()
+    );
+    assert!(
+        !stdout_of(&nucleus(&["list"])).contains(name),
+        "failed start left the container listed"
+    );
+}
+
+#[test]
+fn test_short_lived_detached_container_is_reclaimed() {
+    // A container that exits immediately must still be reaped, and its runtime
+    // directory removed even after `list` prunes its state file.
+    let name = "test-shortlived";
+    let _ = nucleus(&["rm", name, "--force"]);
+
+    let run = nucleus(&[
+        "run",
+        "--rootless",
+        "--name",
+        name,
+        "--detach",
+        "/bin/sh",
+        "-c",
+        "true",
+    ]);
+    assert!(
+        run.status.success(),
+        "a fast but valid exit is not a failure: {}",
+        combined(&run)
+    );
+
+    // Prune state immediately, which is what used to defeat the reaper.
+    let _ = nucleus(&["list"]);
+
+    let container_dir = runtime_containers_dir().join(name);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while container_dir.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(
+        !container_dir.exists(),
+        "short-lived container leaked {} even after its state was pruned",
+        container_dir.display()
+    );
 }

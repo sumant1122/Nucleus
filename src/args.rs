@@ -27,6 +27,9 @@ pub enum Commands {
         /// PID of the container supervisor process
         #[arg(long)]
         pid: i32,
+        /// JSON-encoded teardown spec, captured when the container started
+        #[arg(long)]
+        spec: String,
     },
     /// Execute a command in a running container
     Exec {
@@ -181,6 +184,10 @@ pub struct RunArgs {
     /// Internal flag for sync pipe handle
     #[arg(long, hide = true)]
     pub pipe_fd: Option<i32>,
+
+    /// Internal flag for the startup-status pipe handle
+    #[arg(long, hide = true)]
+    pub status_fd: Option<i32>,
 
     /// Run in rootless mode using User Namespaces
     #[arg(long)]

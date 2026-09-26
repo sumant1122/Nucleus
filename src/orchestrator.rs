@@ -13,6 +13,7 @@ use nix::sys::signal::{self, SigSet, Signal};
 use nix::unistd::{Pid, pipe, write};
 use std::collections::HashSet;
 use std::fs;
+use std::os::fd::RawFd;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant};
 ///
 /// Held by [`CleanupGuard`] so that any early return - including error paths -
 /// tears the container down.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TeardownSpec {
     pub name: String,
     pub veth_host: String,
@@ -226,8 +227,11 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
         subnet.cidr()
     );
 
-    // 3. Sync Pipe
+    // 3. Sync pipes: one to release the child, one to receive its startup
+    // status. They are separate because both ends are inherited across the
+    // fork, so sharing one pipe would race the two readers for the same bytes.
     let (reader, writer) = pipe().context("Failed to create sync pipe")?;
+    let (status_reader, status_writer) = pipe().context("Failed to create startup status pipe")?;
 
     let (v_host, v_child) = generate_veth_names(&args.name);
     let cgroup_path = cgroup_dir_for(&args.name);
@@ -255,6 +259,8 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
         .arg(&container_ip)
         .arg("--pipe-fd")
         .arg(reader.to_string())
+        .arg("--status-fd")
+        .arg(status_writer.to_string())
         .arg("--memory")
         .arg(&args.memory)
         .arg("--network")
@@ -315,6 +321,12 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
         .spawn()
         .context("Failed to spawn child process")?;
 
+    // The child now owns its own copy of the status pipe. Close ours so the
+    // read below sees EOF once the child is gone, rather than blocking until the
+    // timeout on every failed start. `pipe()` hands back raw descriptors, so
+    // this has to be an explicit close rather than a drop.
+    let _ = nix::unistd::close(status_writer);
+
     let pid = child.id() as i32;
 
     // 5. Networking: attach the container end of the veth pair.
@@ -353,6 +365,38 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
 
     // 8. Release the child, which has been waiting on the sync pipe.
     write(writer, b"done").context("Failed to signal container readiness")?;
+
+    // Wait for the child to confirm that it finished setting itself up. Without
+    // this, `run --detach` returns success for a container that died during
+    // startup and the real error is only visible in the log file.
+    match await_startup_status(status_reader, Duration::from_secs(10)) {
+        StartupStatus::Ready => {}
+        StartupStatus::Failed(reason) => {
+            let detail = if reason.is_empty() {
+                "the container process exited during setup".to_string()
+            } else {
+                reason
+            };
+            // The guard tears the half-built container down on this early return.
+            bail!("Container '{}' failed to start: {detail}", args.name);
+        }
+        StartupStatus::Died => {
+            // The guard tears the half-built container down on this early return.
+            bail!(
+                "Container '{}' exited during startup before reporting a result.",
+                args.name
+            );
+        }
+        // A slow host, or a child that could not use the pipe. Proceeding keeps
+        // the previous behaviour rather than failing a container that may work.
+        StartupStatus::Unknown => {
+            eprintln!(
+                "[Nucleus] Warning: no startup confirmation from container '{}'; continuing.",
+                args.name
+            );
+        }
+    }
+
     println!("[Nucleus] Network links established. Handing over control.");
 
     // Record state only once the host side is fully wired up, so a listed
@@ -388,7 +432,7 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
     if args.detach {
         // Hand ownership to a reaper so resources are reclaimed when the
         // container exits, even though this process is about to return.
-        spawn_reaper(&args.name, pid)?;
+        spawn_reaper(&args.name, pid, &spec)?;
         guard.disarm();
 
         println!(
@@ -547,13 +591,22 @@ fn forward_signals(supervisor_pid: i32, init_pid: Option<i32>) {
 }
 
 /// Starts a detached reaper that tears the container down when it exits.
-fn spawn_reaper(name: &str, pid: i32) -> Result<()> {
+///
+/// The teardown spec is serialised into the command line rather than read back
+/// from the state file: `nucleus list` prunes state for containers that have
+/// already exited, so a reaper that depended on it would silently skip cleanup
+/// and leak the container's runtime directory.
+fn spawn_reaper(name: &str, pid: i32, spec: &TeardownSpec) -> Result<()> {
+    let spec_json = serde_json::to_string(spec).context("Failed to serialise the teardown spec")?;
+
     let status = Command::new("/proc/self/exe")
         .arg("internal-reaper")
         .arg("--name")
         .arg(name)
         .arg("--pid")
         .arg(pid.to_string())
+        .arg("--spec")
+        .arg(spec_json)
         // Detach from the caller's stdio so the reaper outlives this process.
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -567,7 +620,7 @@ fn spawn_reaper(name: &str, pid: i32) -> Result<()> {
 }
 
 /// Reaps a detached container and reclaims its host resources.
-pub fn run_reaper(name: &str, pid: i32) -> Result<()> {
+pub fn run_reaper(name: &str, pid: i32, spec_json: &str) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
 
     // Poll for the container supervisor to finish. `process_alive` is used
@@ -580,11 +633,19 @@ pub fn run_reaper(name: &str, pid: i32) -> Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    if let Some(state) = state::get_container_state(name)? {
-        let spec = TeardownSpec::from_state(&state);
-        teardown_container(&spec, true)?;
-    }
-    Ok(())
+    // Prefer the spec captured at spawn time. Fall back to state only if it
+    // cannot be parsed, so an older reaper invocation still cleans up.
+    let spec = serde_json::from_str::<TeardownSpec>(spec_json).or_else(|e| {
+        eprintln!(
+            "[Nucleus] Reaper for '{name}' could not read its teardown spec ({e}); \
+             falling back to saved state."
+        );
+        state::get_container_state(name)?
+            .map(|s| TeardownSpec::from_state(&s))
+            .ok_or_else(|| anyhow::anyhow!("no saved state for '{name}'"))
+    })?;
+
+    teardown_container(&spec, true)
 }
 
 /// Releases every host resource associated with a container.
@@ -666,6 +727,80 @@ pub fn remove_cgroup(path: &str) {
             Err(_) => std::thread::sleep(delay),
         }
         delay = (delay * 2).min(Duration::from_millis(250));
+    }
+}
+
+/// Outcome of the container's startup handshake.
+#[derive(Debug, PartialEq, Eq)]
+enum StartupStatus {
+    /// The child reported that setup finished and it is about to exec.
+    Ready,
+    /// The child reported that setup failed, with the reason it gave.
+    Failed(String),
+    /// The child exited without reporting anything.
+    Died,
+    /// No answer within the timeout.
+    Unknown,
+}
+
+/// Waits for the child's one-byte startup status.
+///
+/// The descriptor is switched to non-blocking so the wait can be bounded
+/// without `poll(2)`, which would need an extra `nix` feature.
+fn await_startup_status(fd: RawFd, timeout: Duration) -> StartupStatus {
+    // SAFETY: fcntl on an owned, open descriptor. Failure only costs us the
+    // handshake, which is treated as "unknown".
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
+        return StartupStatus::Unknown;
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut seen_marker = false;
+    let mut detail = Vec::new();
+
+    loop {
+        let mut chunk = [0u8; 512];
+        // SAFETY: reading into a buffer no larger than the slice, from an owned fd.
+        let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+
+        if n > 0 {
+            let bytes = &chunk[..n as usize];
+            if seen_marker {
+                detail.extend_from_slice(bytes);
+            } else {
+                seen_marker = true;
+                if bytes[0] == crate::container::STARTUP_OK {
+                    return StartupStatus::Ready;
+                }
+                // Failure: the rest of the payload is the reason.
+                detail.extend_from_slice(&bytes[1..]);
+            }
+            continue;
+        }
+
+        if n == 0 {
+            // EOF: every writer closed. Without a marker the child died before
+            // it could report anything.
+            if !seen_marker {
+                return StartupStatus::Died;
+            }
+            let reason = String::from_utf8_lossy(&detail).trim().to_string();
+            return StartupStatus::Failed(reason);
+        }
+
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::WouldBlock {
+            return StartupStatus::Unknown;
+        }
+        if Instant::now() >= deadline {
+            return if seen_marker {
+                let reason = String::from_utf8_lossy(&detail).trim().to_string();
+                StartupStatus::Failed(reason)
+            } else {
+                StartupStatus::Unknown
+            };
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

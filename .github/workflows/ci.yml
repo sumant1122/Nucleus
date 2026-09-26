@@ -70,7 +70,9 @@ jobs:
         fi
 
     - name: Pull a test image
-      run: sudo -E cargo run --locked -- pull alpine
+      # `sudo` resets PATH, so cargo (installed under the runner user's home)
+      # would not be found without passing the current PATH through.
+      run: sudo -E env "PATH=$PATH" cargo run --locked -- pull alpine
 
     - name: Run integration tests as root
       run: sudo -E env "PATH=$PATH" cargo test --locked --test integration_tests -- --nocapture

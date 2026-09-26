@@ -28,8 +28,8 @@ fn main() -> Result<()> {
             // Never returns on success; execs the container process.
             return container::run_container_child(run_args);
         }
-        Some(Commands::InternalReaper { name, pid }) => {
-            return orchestrator::run_reaper(&name, pid);
+        Some(Commands::InternalReaper { name, pid, spec }) => {
+            return orchestrator::run_reaper(&name, pid, &spec);
         }
         Some(Commands::Run(run_args)) => {
             // Validate every flag before reporting a privilege problem, so a

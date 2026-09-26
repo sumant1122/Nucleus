@@ -99,10 +99,35 @@ const UNSUPPORTED_SYSCALLS: &[&str] = &[
     "clone3",
 ];
 
+/// Byte the child writes to the status pipe once setup has succeeded.
+pub const STARTUP_OK: u8 = b'0';
+/// Byte the child writes when setup failed.
+pub const STARTUP_FAILED: u8 = b'1';
+
+/// Reports the startup outcome to the orchestrator.
+///
+/// On failure the error text follows the marker byte so `nucleus run --detach`
+/// can print the real reason instead of only pointing at the log file.
+///
+/// Best effort by design: the orchestrator treats silence as "unknown" rather
+/// than as failure, so a container is never rejected because this pipe broke.
+fn report_startup(status_fd: Option<i32>, byte: u8, detail: Option<&str>) {
+    let Some(fd) = status_fd else { return };
+    let _ = nix::unistd::write(fd, &[byte]);
+    if let Some(detail) = detail {
+        // Cap the payload so a pathological error cannot fill the pipe buffer
+        // and block the child while the orchestrator is not yet reading.
+        let bytes = detail.as_bytes();
+        let capped = &bytes[..bytes.len().min(1024)];
+        let _ = nix::unistd::write(fd, capped);
+    }
+}
+
 /// Child Context: Isolates itself and prepares the container environment.
 pub fn run_container_child(args: RunArgs) -> Result<()> {
     let host_uid = getuid();
     let host_gid = getgid();
+    let status_fd = args.status_fd;
 
     // Resolve all host paths *before* unsharing. Inside a user namespace the
     // process is uid 0, so the XDG/root-aware path helpers would otherwise
@@ -173,10 +198,15 @@ pub fn run_container_child(args: RunArgs) -> Result<()> {
             }
         }
         ForkResult::Child => {
-            setup_container_env(args, &volumes, &rootfs_path, &runtime_dir, &data_dir)?;
+            let result = setup_container_env(args, &volumes, &rootfs_path, &runtime_dir, &data_dir);
+            if let Err(e) = &result {
+                // Tell the orchestrator before exiting, so `run --detach` can
+                // report the real reason instead of claiming success.
+                report_startup(status_fd, STARTUP_FAILED, Some(&format!("{e:#}")));
+            }
+            result
         }
     }
-    Ok(())
 }
 
 /// Applies a seccomp filter that denies dangerous syscalls.
@@ -286,6 +316,7 @@ fn setup_container_env(
     runtime_dir: &Path,
     data_dir: &Path,
 ) -> Result<()> {
+    let status_fd = args.status_fd;
     mount(
         None::<&str>,
         "/",
@@ -533,6 +564,18 @@ fn setup_container_env(
     }
 
     println!("[Container] Entering {}...", args.command[0]);
+
+    // Check the target is actually runnable *before* reporting success. Once
+    // execvp is called this process is replaced and can no longer tell anyone
+    // that the exec failed, so a missing or non-executable command would be
+    // reported to the orchestrator as a successful start and the container would
+    // die silently moments later.
+    verify_command_runnable(&args.command[0])?;
+
+    // Everything that can fail has succeeded, so tell the orchestrator the
+    // container really started before handing control to the target process.
+    report_startup(status_fd, STARTUP_OK, None);
+
     let cmd = CString::new(args.command[0].as_str()).context("Invalid command")?;
     let c_args: Vec<CString> = args
         .command
@@ -650,6 +693,55 @@ fn setup_pseudo_filesystems(rootless: bool) -> Result<()> {
     let _ = symlink("/proc/self/fd/1", "/dev/stdout");
     let _ = symlink("/proc/self/fd/2", "/dev/stderr");
     let _ = symlink("/dev/pts/ptmx", "/dev/ptmx");
+    Ok(())
+}
+
+/// Resolves a command against the container's `PATH` and working directory.
+///
+/// Runs after `pivot_root`, so every path is resolved inside the container.
+fn resolve_command(command: &str) -> Option<PathBuf> {
+    if command.contains('/') {
+        let candidate = PathBuf::from(command);
+        if candidate.is_absolute() {
+            return Some(candidate);
+        }
+        let cwd = std::env::current_dir().ok()?;
+        return Some(cwd.join(candidate));
+    }
+
+    let path = std::env::var("PATH").ok()?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(command))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Ensures the container's command exists and carries an execute bit.
+///
+/// This turns the two most common startup failures, a missing binary and a
+/// non-executable file, into a clear error at startup instead of a container
+/// that dies immediately with the reason buried in the log.
+fn verify_command_runnable(command: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(path) = resolve_command(command) else {
+        bail!(
+            "Command '{command}' was not found inside the container. \
+             Check the image has it and that PATH is set correctly."
+        );
+    };
+
+    let metadata = fs::metadata(&path)
+        .with_context(|| format!("Failed to stat '{}' inside the container", path.display()))?;
+
+    if metadata.is_dir() {
+        bail!("Command '{command}' is a directory, not an executable");
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        bail!(
+            "Command '{command}' at {} is not executable",
+            path.display()
+        );
+    }
     Ok(())
 }
 

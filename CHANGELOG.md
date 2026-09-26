@@ -28,15 +28,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flush everything it installed.
 
 ### Fixed
+- **`nucleus run --detach` no longer reports success for a container that failed to
+  start.** It returned 0 as soon as the host side was wired up, so a container that died
+  during setup looked healthy and the real reason was only in the log file. The child
+  now reports its startup outcome over a dedicated status pipe and the orchestrator
+  waits for it, so a bad command is a non-zero exit with the reason inline:
+  `Error: Container 'web' failed to start: Command '/etc/hostname' at /etc/hostname is
+  not executable`. A short-lived but valid container is still reported as success.
+- **The command is verified to be runnable before the container is declared started.**
+  `execvp` replaces the process, so once it is called the child can no longer report
+  that the exec failed, and a missing binary was indistinguishable from success. The
+  target is now resolved against the container's `PATH` and checked for existence and
+  an execute bit first, which catches the two most common startup failures
+  deterministically.
+- **The detached reaper no longer depends on the state file.** `nucleus list` prunes
+  state for containers that have already exited, so a reaper reading it back would find
+  nothing and skip cleanup, leaking the container's runtime directory. The teardown spec
+  is now serialised into the reaper's command line, with the state file kept only as a
+  fallback.
+- The status pipe descriptor is now closed by the orchestrator after spawning the child.
+  `nix::unistd::pipe` returns raw descriptors, so this needs an explicit `close(2)`;
+  without it every failed start blocked for the full handshake timeout.
 - **Container path normalisation is now idempotent.** Two bugs let the value the
   orchestrator validated differ from the value the child actually mounted, because the
   child re-normalises the spec it was handed:
   - `str::trim` is Unicode-aware, so a path ending in U+2000 was trimmed on the second
     pass but not the first. Trimming is now ASCII-only.
-  - A path component with surrounding whitespace (`/data /sub`) survived the first
-    pass and was stripped on the second. Such components are now rejected rather than
+  - A path component with surrounding whitespace (`/data /sub`) survived the first pass
+    and was stripped on the second. Such components are now rejected rather than
     silently transformed, since trimming them would mount somewhere other than what was
     checked.
+
   Both were found by the new property tests, not by inspection.
 
 ### Corrected
@@ -46,14 +68,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and explains the limitation when it rejects a run.
 
 ### Tests
-- 93 tests, up from 67. Added `proptest`-based property tests for every input parser on
+- 96 tests, up from 67. Added `proptest`-based property tests for every input parser on
   the security boundary, asserting that arbitrary input either errors or satisfies the
   safety invariant — no panics, no silently-accepted unsafe values. Two of the parsers'
   invariants had never been true before.
+- Added coverage for the startup handshake: a `--detach` run whose command cannot start
+  must fail, must leave no runtime directory, and must say why. A short-lived container
+  must still succeed and still be reclaimed after its state is pruned.
+- Container logs are dumped into the failure message, so a container that dies during
+  startup no longer produces a bare "not listed" assertion.
 - Added `nucleus info` and `flush-firewall` integration coverage, including the JSON
   schema and the exit-code contract.
 - Failed property cases are recorded in `proptest-regressions/` and re-run on every
   future run.
+- Fixed the privileged CI job, where `sudo -E cargo` could not find cargo because
+  `sudo` resets `PATH`.
 
 ## [0.3.0] - 2026-09-26
 
