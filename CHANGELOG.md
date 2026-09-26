@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.3.0] - 2026-09-26
 
 ### Added
 - **`nucleus info`** reports the host capabilities Nucleus depends on: cgroup v2 and
@@ -84,7 +84,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and was stripped on the second. Such components are now rejected rather than
     silently transformed, since trimming them would mount somewhere other than what was
     checked.
-
   Both were found by the new property tests, not by inspection.
 
 ### Corrected
@@ -107,12 +106,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema and the exit-code contract.
 - Failed property cases are recorded in `proptest-regressions/` and re-run on every
   future run.
-- Fixed the privileged CI job, where `sudo -E cargo` could not find cargo because- Added a regression test asserting the iptables argument order, since the same mistake
+- Added a regression test asserting the iptables argument order, since the same mistake
   was present in the pre-0.3.0 code and had never been exercised.
 - Fixed the privileged CI job, where `sudo -E cargo` could not find cargo because
   `sudo` resets `PATH`.
 
-## [0.3.0] - 2026-09-26
+### 🔧 Repairing the Withdrawn 0.2.0 Release
+
+0.2.0 shipped broken and was withdrawn. The changes below are part of the same 0.3.0 release, since 0.3.0 was never published on its own.
 
 This release repairs the build breakage and resource leaks introduced in 0.2.0 and
 closes several security gaps. **0.2.0 never compiled**; the `v0.2.0` tag exists but no
