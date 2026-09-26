@@ -123,18 +123,24 @@ fn report_startup(status_fd: Option<i32>, byte: u8, detail: Option<&str>) {
     }
 }
 
-/// Child Context: Isolates itself and prepares the container environment.
-pub fn run_container_child(args: RunArgs) -> Result<()> {
-    let host_uid = getuid();
-    let host_gid = getgid();
-    let status_fd = args.status_fd;
+/// Host paths and validated specs resolved before any namespace is created.
+struct Prepared {
+    volumes: Vec<crate::utils::Volume>,
+    rootfs_path: PathBuf,
+    runtime_dir: PathBuf,
+    data_dir: PathBuf,
+}
 
-    // Resolve all host paths *before* unsharing. Inside a user namespace the
-    // process is uid 0, so the XDG/root-aware path helpers would otherwise
-    // resolve to root-only locations like /var/lib and /run, making the image
-    // and overlay directories unreachable for unprivileged users.
+/// Resolves the image, directory layout and volume specs.
+///
+/// This deliberately runs before `unshare` and before the fork: inside a user
+/// namespace the process is uid 0, so the XDG/root-aware path helpers would
+/// resolve to root-only locations such as `/var/lib` and `/run`, making the
+/// image and overlay directories unreachable for unprivileged users.
+fn prepare(args: &RunArgs) -> Result<Prepared> {
     let data_dir = get_nucleus_data_dir();
     let runtime_dir = get_nucleus_runtime_dir();
+
     let rootfs_path = crate::image::resolve_image_path(&args.image).ok_or_else(|| {
         anyhow::anyhow!(
             "Image '{}' not found. Please run 'Nucleus pull {}' first.",
@@ -151,14 +157,49 @@ pub fn run_container_child(args: RunArgs) -> Result<()> {
         );
     }
 
-    // Validate everything that influences filesystem layout before unsharing,
-    // so a bad spec fails before any namespace exists.
+    // Validate everything that influences filesystem layout, so a bad spec fails
+    // before any namespace exists.
     let volumes = args
         .volumes
         .iter()
         .map(|v| parse_volume(v))
         .collect::<Result<Vec<_>>>()
         .context("Invalid volume specification")?;
+
+    Ok(Prepared {
+        volumes,
+        rootfs_path,
+        runtime_dir,
+        data_dir,
+    })
+}
+
+/// Child Context: Isolates itself and prepares the container environment.
+pub fn run_container_child(args: RunArgs) -> Result<()> {
+    let host_uid = getuid();
+    let host_gid = getgid();
+    let status_fd = args.status_fd;
+
+    // Resolve all host paths *before* unsharing. Inside a user namespace the
+    // process is uid 0, so the XDG/root-aware path helpers would otherwise
+    // resolve to root-only locations like /var/lib and /run, making the image
+    // and overlay directories unreachable for unprivileged users.
+    //
+    // This runs in the supervisor, before the fork, so a failure here is
+    // reported from this process; the forked child never exists to report it.
+    let prepared = match prepare(&args) {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            report_startup(status_fd, STARTUP_FAILED, Some(&format!("{e:#}")));
+            return Err(e);
+        }
+    };
+    let Prepared {
+        volumes,
+        rootfs_path,
+        runtime_dir,
+        data_dir,
+    } = prepared;
 
     // 1. Isolate User Namespace FIRST if rootless
     if args.rootless {

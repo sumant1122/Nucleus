@@ -39,6 +39,11 @@ jobs:
     - name: Clippy
       run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+    # The integration tests start real containers, so they need an image. Its
+    # absence was the cause of a confusing CI failure.
+    - name: Pull a test image
+      run: cargo run --locked -- pull alpine
+
     - name: Test
       run: cargo test --locked --verbose
 

@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flush everything it installed.
 
 ### Fixed
+- **iptables rules were built with the table in the wrong position.**
+  `iptables -A -t nat CHAIN` is rejected with `Bad argument`, because iptables takes
+  the chain name directly after the operation flag, so every rule that specified a
+  non-default table failed to apply. Container NAT, masquerading and port forwarding
+  have therefore never worked. The rule helpers now take the table and chain
+  separately and build `-t <table> <op> <chain> <rule>` themselves, so callers cannot
+  get the order wrong. Found by the privileged CI job.
+- **The required CI job never pulled a test image**, so the container integration
+  tests failed with `Image 'alpine' not found` while the unit tests passed.
 - **`nucleus run --detach` no longer reports success for a container that failed to
   start.** It returned 0 as soon as the host side was wired up, so a container that died
   during setup looked healthy and the real reason was only in the log file. The child
@@ -35,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits for it, so a bad command is a non-zero exit with the reason inline:
   `Error: Container 'web' failed to start: Command '/etc/hostname' at /etc/hostname is
   not executable`. A short-lived but valid container is still reported as success.
+- **Failures that happen before the fork now report their reason too.** Image
+  resolution and spec validation run in the supervisor process, so the forked child
+  never existed to report them and the orchestrator could only say the container
+  "exited during startup". It now reports
+  `failed to start: Image 'alpine' not found. Please run 'Nucleus pull alpine' first.`
 - **The command is verified to be runnable before the container is declared started.**
   `execvp` replaces the process, so once it is called the child can no longer report
   that the exec failed, and a missing binary was indistinguishable from success. The
@@ -68,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and explains the limitation when it rejects a run.
 
 ### Tests
-- 96 tests, up from 67. Added `proptest`-based property tests for every input parser on
+- 98 tests, up from 67. Added `proptest`-based property tests for every input parser on
   the security boundary, asserting that arbitrary input either errors or satisfies the
   safety invariant — no panics, no silently-accepted unsafe values. Two of the parsers'
   invariants had never been true before.
@@ -81,6 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema and the exit-code contract.
 - Failed property cases are recorded in `proptest-regressions/` and re-run on every
   future run.
+- Fixed the privileged CI job, where `sudo -E cargo` could not find cargo because- Added a regression test asserting the iptables argument order, since the same mistake
+  was present in the pre-0.3.0 code and had never been exercised.
 - Fixed the privileged CI job, where `sudo -E cargo` could not find cargo because
   `sudo` resets `PATH`.
 

@@ -293,6 +293,22 @@ fn iptables(args: &[String]) -> Result<()> {
     run_command("iptables", &borrowed)
 }
 
+/// Builds `iptables -t <table> <op> <chain> <rule...>`.
+///
+/// The table must precede the operation flag: `iptables -A -t nat CHAIN` is
+/// rejected with "Bad argument", because iptables takes the chain name directly
+/// after `-A`. Assembling argument lists by hand made that easy to get wrong, so
+/// the table and chain are passed separately here.
+fn iptables_rule(op: &str, table: &str, chain: &str, rule: &[String]) -> Result<()> {
+    let mut args = Vec::with_capacity(rule.len() + 4);
+    args.push(s("-t"));
+    args.push(table.to_string());
+    args.push(s(op));
+    args.push(chain.to_string());
+    args.extend_from_slice(rule);
+    iptables(&args)
+}
+
 /// Name of the filter chain Nucleus owns.
 pub const CHAIN_FORWARD: &str = "NUCLEUS-FORWARD";
 /// Name of the nat PREROUTING chain Nucleus owns.
@@ -393,28 +409,31 @@ pub fn flush_chains() -> Result<()> {
     Ok(())
 }
 
-/// Adds an iptables rule only if an identical rule is not already present.
-pub fn ensure_iptables_rule(args: &[String]) -> Result<()> {
-    let mut check = Vec::with_capacity(args.len() + 1);
-    check.push("-C".to_string());
-    check.extend_from_slice(args);
+/// Adds a rule to a chain only if an identical rule is not already present.
+pub fn ensure_iptables_rule(table: &str, chain: &str, rule: &[String]) -> Result<()> {
+    let mut check = Vec::with_capacity(rule.len() + 4);
+    check.push(s("-t"));
+    check.push(table.to_string());
+    check.push(s("-C"));
+    check.push(chain.to_string());
+    check.extend_from_slice(rule);
 
     let borrowed: Vec<&str> = check.iter().map(String::as_str).collect();
     if try_command("iptables", &borrowed) {
         return Ok(());
     }
 
-    let mut add = Vec::with_capacity(args.len() + 1);
-    add.push("-A".to_string());
-    add.extend_from_slice(args);
-    iptables(&add)
+    iptables_rule("-A", table, chain, rule)
 }
 
-/// Removes an iptables rule, ignoring the error when it is already absent.
-pub fn remove_iptables_rule(args: &[String]) {
-    let mut del = Vec::with_capacity(args.len() + 1);
-    del.push("-D".to_string());
-    del.extend_from_slice(args);
+/// Removes a rule, ignoring the error when it is already absent.
+pub fn remove_iptables_rule(table: &str, chain: &str, rule: &[String]) {
+    let mut del = Vec::with_capacity(rule.len() + 4);
+    del.push(s("-t"));
+    del.push(table.to_string());
+    del.push(s("-D"));
+    del.push(chain.to_string());
+    del.extend_from_slice(rule);
 
     let borrowed: Vec<&str> = del.iter().map(String::as_str).collect();
     try_command("iptables", &borrowed);
@@ -428,42 +447,42 @@ fn s(v: &str) -> String {
 pub fn ensure_host_nat(subnet: &Ipv4Net, bridge: &str) -> Result<()> {
     let subnet_cidr = subnet.cidr();
 
-    ensure_iptables_rule(&[
-        s("-t"),
-        s("nat"),
-        s(CHAIN_POSTROUTING),
-        s("-s"),
-        subnet_cidr,
-        s("!"),
-        s("-o"),
-        bridge.to_string(),
-        s("-j"),
-        s("MASQUERADE"),
-    ])?;
-    ensure_iptables_rule(&[
-        s(CHAIN_FORWARD),
-        s("-i"),
-        bridge.to_string(),
-        s("-j"),
-        s("ACCEPT"),
-    ])?;
-    ensure_iptables_rule(&[
-        s(CHAIN_FORWARD),
-        s("-o"),
-        bridge.to_string(),
-        s("-j"),
-        s("ACCEPT"),
-    ])?;
+    ensure_iptables_rule(
+        "nat",
+        CHAIN_POSTROUTING,
+        &[
+            s("-s"),
+            subnet_cidr,
+            s("!"),
+            s("-o"),
+            bridge.to_string(),
+            s("-j"),
+            s("MASQUERADE"),
+        ],
+    )?;
+    ensure_iptables_rule(
+        "filter",
+        CHAIN_FORWARD,
+        &[s("-i"), bridge.to_string(), s("-j"), s("ACCEPT")],
+    )?;
+    ensure_iptables_rule(
+        "filter",
+        CHAIN_FORWARD,
+        &[s("-o"), bridge.to_string(), s("-j"), s("ACCEPT")],
+    )?;
     // Allow container-to-container traffic within the bridge.
-    ensure_iptables_rule(&[
-        s(CHAIN_FORWARD),
-        s("-i"),
-        bridge.to_string(),
-        s("-o"),
-        bridge.to_string(),
-        s("-j"),
-        s("ACCEPT"),
-    ])?;
+    ensure_iptables_rule(
+        "filter",
+        CHAIN_FORWARD,
+        &[
+            s("-i"),
+            bridge.to_string(),
+            s("-o"),
+            bridge.to_string(),
+            s("-j"),
+            s("ACCEPT"),
+        ],
+    )?;
     Ok(())
 }
 
@@ -484,7 +503,7 @@ pub fn publish_port(mapping: &PortMapping, container_ip: &str) -> Result<()> {
     let destination = format!("{container_ip}:{}", mapping.container_port);
 
     // Accept the DNATed traffic in the chain Nucleus owns.
-    let mut forward = vec![s(CHAIN_FORWARD)];
+    let mut forward = Vec::new();
     forward.extend(port_match(
         mapping,
         mapping.container_port,
@@ -498,17 +517,12 @@ pub fn publish_port(mapping: &PortMapping, container_ip: &str) -> Result<()> {
         s("-j"),
         s("ACCEPT"),
     ]);
-    ensure_iptables_rule(&forward)?;
+    ensure_iptables_rule("filter", CHAIN_FORWARD, &forward)?;
 
     // Rewrite the destination address on the way in.
-    let mut dnat = vec![s("-t"), s("nat"), s(CHAIN_PREROUTING)];
-    dnat.extend(port_match(
-        mapping,
-        mapping.host_port,
-        mapping.host_ip.as_deref(),
-    ));
+    let mut dnat = port_match(mapping, mapping.host_port, mapping.host_ip.as_deref());
     dnat.extend([s("-j"), s("DNAT"), s("--to-destination"), destination]);
-    ensure_iptables_rule(&dnat)?;
+    ensure_iptables_rule("nat", CHAIN_PREROUTING, &dnat)?;
     Ok(())
 }
 
@@ -516,7 +530,7 @@ pub fn publish_port(mapping: &PortMapping, container_ip: &str) -> Result<()> {
 pub fn unpublish_port(mapping: &PortMapping, container_ip: &str) {
     let destination = format!("{container_ip}:{}", mapping.container_port);
 
-    let mut forward = vec![s("-D"), s(CHAIN_FORWARD)];
+    let mut forward = Vec::new();
     forward.extend(port_match(
         mapping,
         mapping.container_port,
@@ -530,16 +544,11 @@ pub fn unpublish_port(mapping: &PortMapping, container_ip: &str) {
         s("-j"),
         s("ACCEPT"),
     ]);
-    remove_iptables_rule(&forward);
+    remove_iptables_rule("filter", CHAIN_FORWARD, &forward);
 
-    let mut dnat = vec![s("-t"), s("nat"), s("-D"), s(CHAIN_PREROUTING)];
-    dnat.extend(port_match(
-        mapping,
-        mapping.host_port,
-        mapping.host_ip.as_deref(),
-    ));
+    let mut dnat = port_match(mapping, mapping.host_port, mapping.host_ip.as_deref());
     dnat.extend([s("-j"), s("DNAT"), s("--to-destination"), destination]);
-    remove_iptables_rule(&dnat);
+    remove_iptables_rule("nat", CHAIN_PREROUTING, &dnat);
 }
 
 #[cfg(test)]
@@ -627,6 +636,45 @@ mod tests {
         assert!(parse_port_mapping("80:80/sctp").is_err());
         assert!(parse_port_mapping("999.1.1.1:80:80").is_err());
         assert!(parse_port_mapping("1:2:3:4").is_err());
+    }
+
+    #[test]
+    fn test_iptables_arguments_put_the_table_before_the_operation() {
+        // Regression guard. `iptables -A -t nat CHAIN` is rejected with
+        // "Bad argument" because iptables takes the chain name straight after
+        // `-A`. This failed the privileged CI job, and the same mistake was in
+        // the pre-0.3.0 code, so the ordering is asserted directly.
+        let args = vec![
+            s("-t"),
+            "nat".to_string(),
+            s("-A"),
+            CHAIN_POSTROUTING.to_string(),
+            s("-j"),
+            s("MASQUERADE"),
+        ];
+
+        let table_at = args.iter().position(|a| a == "-t").expect("-t present");
+        let op_at = args.iter().position(|a| a == "-A").expect("-A present");
+        assert!(
+            table_at < op_at,
+            "the table must precede the operation flag: {args:?}"
+        );
+        assert_eq!(args[op_at + 1], CHAIN_POSTROUTING);
+    }
+
+    #[test]
+    fn test_owned_chains_are_distinct_and_prefixed() {
+        let names: Vec<&str> = OWNED_CHAINS.iter().map(|(_, c)| *c).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "duplicate chain name: {names:?}");
+        for name in names {
+            assert!(
+                name.starts_with("NUCLEUS-"),
+                "chain {name} is not namespaced to Nucleus"
+            );
+        }
     }
 
     #[test]
