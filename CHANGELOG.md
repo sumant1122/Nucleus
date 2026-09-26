@@ -37,6 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   get the order wrong. Found by the privileged CI job.
 - **The required CI job never pulled a test image**, so the container integration
   tests failed with `Image 'alpine' not found` while the unit tests passed.
+- **A refused `setgroups` write no longer aborts a rootless container.** Writing
+  `deny` to `/proc/self/setgroups` is required before `gid_map` on some kernels, but
+  hardened configurations refuse the `setgroups` write itself. It is now advisory, and
+  the actionable error comes from `gid_map`, which names the likely cause.
+- **`nucleus info` now probes the whole rootless sequence** — `unshare`, `setgroups`,
+  `uid_map` and `gid_map` — rather than just `unshare(2)`. A kernel that permits the
+  namespace but refuses the mapping cannot run a rootless container, and the previous
+  check reported such a host as usable.
+- **The container integration tests skip when the host cannot run rootless
+  containers**, using that same `nucleus info` verdict, and say which probe failed.
+  Previously such a host produced a confusing assertion failure inside the container
+  setup rather than an environmental skip.
 - **`nucleus run --detach` no longer reports success for a container that failed to
   start.** It returned 0 as soon as the host side was wired up, so a container that died
   during setup looked healthy and the real reason was only in the log file. The child

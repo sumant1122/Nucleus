@@ -402,7 +402,17 @@ fn probe_unshare_user() -> bool {
             matches!(waitpid(child, None), Ok(WaitStatus::Exited(_, 0)))
         }
         Ok(ForkResult::Child) => {
-            let ok = unshare(CloneFlags::CLONE_NEWUSER).is_ok();
+            // Probe the whole sequence a rootless container depends on, not
+            // just unshare(2). A kernel or LSM that permits the namespace but
+            // refuses the id mapping still cannot run a rootless container, so
+            // a bare unshare check would wrongly report success.
+            let uid = nix::unistd::getuid();
+            let gid = nix::unistd::getgid();
+            let ok = unshare(CloneFlags::CLONE_NEWUSER).is_ok()
+                // setgroups=deny is advisory here; gid_map is the real test.
+                && fs::write("/proc/self/setgroups", "deny").is_ok()
+                && fs::write("/proc/self/uid_map", format!("0 {uid} 1")).is_ok()
+                && fs::write("/proc/self/gid_map", format!("0 {gid} 1")).is_ok();
             std::process::exit(if ok { 0 } else { 1 });
         }
         Err(_) => false,

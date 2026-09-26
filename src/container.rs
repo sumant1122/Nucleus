@@ -206,13 +206,29 @@ pub fn run_container_child(args: RunArgs) -> Result<()> {
         unshare(CloneFlags::CLONE_NEWUSER).context("Failed to unshare user namespace")?;
 
         println!("[Container] Setting up User Namespace ID mapping...");
-        // Map only the invoking uid/gid; without setgroups=deny the write is
-        // rejected on modern kernels.
+        // Map only the invoking uid/gid. `setgroups=deny` normally has to be
+        // written before gid_map, and the kernel refuses gid_map without it
+        // for an unprivileged writer. Some hardened kernels refuse the
+        // setgroups write itself, so it is not treated as fatal: gid_map below
+        // is the real test and produces the actionable error if it is
+        // genuinely unusable.
+        if let Err(e) = fs::write("/proc/self/setgroups", "deny") {
+            println!(
+                "[Container] Note: could not write /proc/self/setgroups ({e}); \
+                 continuing and relying on gid_map."
+            );
+        }
+
         let uid_map = format!("0 {host_uid} 1");
-        fs::write("/proc/self/setgroups", "deny").context("Failed to write to setgroups")?;
-        fs::write("/proc/self/uid_map", uid_map).context("Failed to write to uid_map")?;
+        fs::write("/proc/self/uid_map", uid_map).with_context(|| {
+            "Failed to write uid_map. An unprivileged user namespace can only map \
+             its own uid, and only if the kernel permits unprivileged userns."
+        })?;
         let gid_map = format!("0 {host_gid} 1");
-        fs::write("/proc/self/gid_map", gid_map).context("Failed to write to gid_map")?;
+        fs::write("/proc/self/gid_map", gid_map).with_context(|| {
+            "Failed to write gid_map. Either the kernel refused the mapping, or \
+             /proc/self/setgroups could not be set to 'deny' beforehand."
+        })?;
     }
 
     // 2. Isolate other namespaces

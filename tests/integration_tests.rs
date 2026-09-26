@@ -28,6 +28,60 @@ fn combined(output: &Output) -> String {
     format!("{}{}", stdout_of(output), stderr_of(output))
 }
 
+/// Whether this host can actually run a rootless container.
+///
+/// The container tests need a working unprivileged user namespace with a
+/// writable id mapping. Some CI kernels permit `unshare(CLONE_NEWUSER)` but
+/// refuse the mapping, which would otherwise surface as a confusing test
+/// failure rather than an environmental skip. `nucleus info` performs exactly
+/// this probe.
+fn rootless_supported() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let output = nucleus(&["info", "--json"]);
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout_of(&output)) else {
+            // If the probe cannot be parsed, assume supported rather than
+            // silently skipping everything.
+            return true;
+        };
+        let supported = json["rootless_available"].as_bool().unwrap_or(true);
+        if !supported {
+            let reason = json["probes"]
+                .as_array()
+                .map(|probes| {
+                    probes
+                        .iter()
+                        .filter(|p| p["status"] == "FAIL")
+                        .map(|p| p["name"].as_str().unwrap_or("?").to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            eprintln!("skipping rootless container tests: host cannot map user ids ({reason})");
+        }
+        supported
+    })
+}
+
+/// Skips the calling test when the host cannot run rootless containers.
+macro_rules! require_rootless {
+    () => {
+        if !rootless_supported() {
+            return;
+        }
+    };
+}
+
+/// Skips the calling test when not running as root.
+macro_rules! require_root {
+    () => {
+        if !is_root() {
+            eprintln!("skipping: requires root");
+            return;
+        }
+    };
+}
+
 fn is_root() -> bool {
     // SAFETY: getuid() has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
@@ -373,10 +427,8 @@ fn test_pull_reports_arch_mismatch_instead_of_substituting() {
 
 #[test]
 fn test_container_lifecycle() {
-    if !is_root() {
-        eprintln!("skipping: container lifecycle test requires root");
-        return;
-    }
+    require_root!();
+    require_rootless!();
 
     let name = "test-integration-box";
 
@@ -456,10 +508,7 @@ fn test_container_lifecycle() {
 
 #[test]
 fn test_detached_container_is_reaped_on_exit() {
-    if !is_root() {
-        eprintln!("skipping: reaper test requires root");
-        return;
-    }
+    require_root!();
 
     let name = "test-reaper-box";
     let _ = nucleus(&["stop", name]);
@@ -499,6 +548,7 @@ fn test_detached_container_is_reaped_on_exit() {
 
 #[test]
 fn test_rootless_run_leaves_no_runtime_directory() {
+    require_rootless!();
     // Regression guard: OverlayFS creates an internal work directory with mode
     // 000, so a plain recursive delete fails with EACCES and the whole
     // per-container directory leaks. This has to be observable, so assert it.
@@ -527,6 +577,7 @@ fn test_rootless_run_leaves_no_runtime_directory() {
 
 #[test]
 fn test_detached_container_is_listed_then_reclaimed() {
+    require_rootless!();
     let name = "test-detached-box";
     let _ = nucleus(&["stop", name]);
     let _ = nucleus(&["rm", name, "--force"]);
@@ -699,6 +750,7 @@ fn read_container_log(name: &str) -> String {
 
 #[test]
 fn test_detached_run_fails_when_the_command_cannot_start() {
+    require_rootless!();
     // `run --detach` must not claim success for a container that cannot start.
     // This is what made a CI failure undiagnosable: the error was buried in
     // the log while the command exited 0.
@@ -729,6 +781,7 @@ fn test_detached_run_fails_when_the_command_cannot_start() {
 
 #[test]
 fn test_failed_start_leaves_no_runtime_directory() {
+    require_rootless!();
     let name = "test-badcmd-cleanup";
     let _ = nucleus(&["rm", name, "--force"]);
 
@@ -757,6 +810,7 @@ fn test_failed_start_leaves_no_runtime_directory() {
 
 #[test]
 fn test_short_lived_detached_container_is_reclaimed() {
+    require_rootless!();
     // A container that exits immediately must still be reaped, and its runtime
     // directory removed even after `list` prunes its state file.
     let name = "test-shortlived";
