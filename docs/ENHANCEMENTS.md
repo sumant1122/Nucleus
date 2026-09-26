@@ -1,5 +1,13 @@
 # Nucleus: Codebase Analysis, Critical Bug Fixes & Enhancement Roadmap ⚛️
 
+> **Historical document.** This analysis describes the codebase as of the
+> `enhancements` branch (v0.2.0) and is kept for reference only. Several details
+> it describes as current are no longer true: the subnet is no longer hardcoded to
+> `10.0.0.0/24`, the CLI now implements `exec`, `inspect`, `ps`, `images`, `rmi` and
+> `rm`, and the `internal-child` flow now records and signals the container's init
+> PID. See the [changelog](../CHANGELOG.md) for what changed in 0.3.0 and the
+> [README](../README.md) for current behaviour.
+
 ## 1. Executive Summary
 
 **Nucleus** is a minimalist, high-performance container engine written in pure Rust. It implements zero-daemon process isolation utilizing Linux kernel primitives: Namespaces (`user`, `pid`, `mount`, `net`, `uts`, `cgroup`), Cgroups v2, OverlayFS, `pivot_root`, and host-driven `nsenter` network configuration.

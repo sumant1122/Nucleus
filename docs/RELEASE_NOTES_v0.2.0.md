@@ -1,5 +1,14 @@
 # Nucleus v0.2.0 Release Notes ⚛️
 
+> **v0.2.0 was withdrawn.** It did not compile: `main.rs` matched
+> `Commands::Stop` without the field added in the same commit, and six declared
+> subcommands were never dispatched, so `cargo build` failed with `E0027` and
+> `E0004`. The `v0.2.0` tag exists but the release workflow failed, so no binary
+> was published. Several items below were also incorrect as written, notably
+> multi-architecture support (the download cache was not keyed by architecture)
+> and DNS handling. See the [changelog](../CHANGELOG.md) for the 0.3.0 release,
+> which supersedes this document.
+
 Nucleus **v0.2.0** introduces critical bug fixes, multi-architecture rootfs support, Linux filesystem standardizations, security hardening, and reliability improvements across the container runtime and orchestrator.
 
 ## 🚀 Key Highlights

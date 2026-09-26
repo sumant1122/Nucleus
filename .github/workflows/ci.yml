@@ -8,13 +8,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
   build:
+    name: Build, lint and unit test
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Install dependencies
       run: |
@@ -26,14 +28,49 @@ jobs:
       with:
         components: clippy, rustfmt
 
+    - uses: Swatinem/rust-cache@v2
+
     - name: Build
-      run: cargo build --verbose
-
-    - name: Run tests
-      run: cargo test --verbose
-
-    - name: Run clippy
-      run: cargo clippy -- -D warnings
+      run: cargo build --locked --verbose
 
     - name: Check formatting
-      run: cargo fmt -- --check
+      run: cargo fmt --all -- --check
+
+    - name: Clippy
+      run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+    - name: Test
+      run: cargo test --locked --verbose
+
+  integration:
+    name: Container lifecycle (privileged)
+    runs-on: ubuntu-latest
+    # Requires namespaces, cgroup v2 and iptables, which are not always
+    # available or permitted on shared runners. Report the result without
+    # blocking the required checks above.
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libseccomp-dev iptables iproute2
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - uses: Swatinem/rust-cache@v2
+
+    - name: Confirm cgroup v2 is available
+      run: |
+        if [ "$(stat -fc %T /sys/fs/cgroup)" != "cgroup2fs" ]; then
+          echo "::warning::cgroup v2 is not mounted; container limits will be skipped"
+        fi
+
+    - name: Pull a test image
+      run: sudo -E cargo run --locked -- pull alpine
+
+    - name: Run integration tests as root
+      run: sudo -E env "PATH=$PATH" cargo test --locked --test integration_tests -- --nocapture

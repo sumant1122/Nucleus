@@ -1,63 +1,82 @@
-use anyhow::Result;
+use crate::utils::format_bytes;
+use anyhow::{Result, bail};
 use std::fs;
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Point-in-time resource usage for a container.
+pub struct ContainerStats {
+    /// CPU utilisation as a percentage of a single core.
+    pub cpu_percentage: f64,
+    pub memory_usage: u64,
+    pub memory_limit: u64,
+    pub swap_usage: u64,
+    pub pids_current: u64,
+}
+
 pub fn display_stats(name: &str, stream: bool) -> Result<()> {
-    // Verify container exists in state
     let containers = crate::state::list_containers()?;
-    if !containers.iter().any(|c| c.name == name) {
-        return Err(anyhow::anyhow!(
-            "Container '{}' not found or not running.",
-            name
-        ));
+    let state = containers
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| anyhow::anyhow!("Container '{name}' not found or not running."))?;
+
+    if state.rootless {
+        bail!(
+            "stats is unavailable for rootless container '{name}': no cgroup is attached in rootless mode"
+        );
     }
 
-    let cgroup_base = format!("/sys/fs/cgroup/{}", name);
+    let cgroup_base = state.cgroup_dir();
+    if !Path::new(&cgroup_base).exists() {
+        bail!(
+            "Container '{name}' has no cgroup at {}. Was it created before resource limits were supported?",
+            cgroup_base
+        );
+    }
+
     let mut prev_cpu_usec: Option<u64> = None;
     let mut prev_instant = Instant::now();
 
     loop {
-        let stats = match get_container_stats(name, &cgroup_base, &mut prev_cpu_usec, &mut prev_instant) {
-            Ok(s) => s,
-            Err(e) => {
-                if stream {
-                    println!("\r[Nucleus] Container '{}' stopped.", name);
-                    break;
-                } else {
+        let stats =
+            match get_container_stats(name, &cgroup_base, &mut prev_cpu_usec, &mut prev_instant) {
+                Ok(s) => s,
+                Err(e) => {
+                    if stream {
+                        println!("\r[Nucleus] Container '{name}' stopped.");
+                        break;
+                    }
                     return Err(e);
                 }
-            }
-        };
+            };
 
-        // Clear screen if streaming
         if stream {
+            // Clear screen and home the cursor for a stable one-line refresh.
             print!("\x1B[2J\x1B[H");
         }
-
-        println!(
-            "{:<20} {:<15} {:<25} {:<10}",
-            "NAME", "CPU %", "MEM USAGE / LIMIT", "PIDS"
-        );
-        println!("{:-<75}", "");
 
         let mem_limit_str = if stats.memory_limit == 0 {
             "unlimited".to_string()
         } else {
-            format!("{:.2}MB", stats.memory_limit as f64 / 1024.0 / 1024.0)
+            format_bytes(stats.memory_limit)
         };
 
         println!(
-            "{:<20} {:<15.2} {:<25} {:<10}",
+            "{:<20} {:<15} {:<25} {:<15} {:<10}",
+            "NAME", "CPU %", "MEM USAGE / LIMIT", "SWAP USAGE", "PIDS"
+        );
+        println!("{:-<90}", "");
+        println!(
+            "{:<20} {:<15.2} {:<25} {:<15} {:<10}",
             name,
             stats.cpu_percentage,
-            format!(
-                "{:.2}MB / {}",
-                stats.memory_usage as f64 / 1024.0 / 1024.0,
-                mem_limit_str
-            ),
+            format!("{} / {}", format_bytes(stats.memory_usage), mem_limit_str),
+            format_bytes(stats.swap_usage),
             stats.pids_current
         );
+        println!("(CPU % is relative to a single core; 100% = 1 core saturated)");
 
         if !stream {
             break;
@@ -67,23 +86,25 @@ pub fn display_stats(name: &str, stream: bool) -> Result<()> {
     Ok(())
 }
 
-pub struct ContainerStats {
-    pub cpu_percentage: f64,
-    pub memory_usage: u64,
-    pub memory_limit: u64,
-    pub pids_current: u64,
-}
-
+/// Reads `usage_usec` from a cgroup's `cpu.stat`.
 fn read_cpu_usec(cgroup_path: &str) -> Result<u64> {
-    let content = fs::read_to_string(format!("{}/cpu.stat", cgroup_path))?;
+    let content = fs::read_to_string(format!("{cgroup_path}/cpu.stat"))?;
     for line in content.lines() {
-        if line.starts_with("usage_usec") {
-            if let Some(val_str) = line.split_whitespace().nth(1) {
-                return Ok(val_str.parse().unwrap_or(0));
-            }
+        if let Some(rest) = line.strip_prefix("usage_usec")
+            && let Some(value) = rest.split_whitespace().next()
+        {
+            return Ok(value.parse().unwrap_or(0));
         }
     }
     Ok(0)
+}
+
+/// Reads a single-value cgroup file, tolerating absence.
+fn read_counter(cgroup_path: &str, file: &str) -> u64 {
+    fs::read_to_string(format!("{cgroup_path}/{file}"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 fn get_container_stats(
@@ -92,34 +113,25 @@ fn get_container_stats(
     prev_cpu: &mut Option<u64>,
     prev_instant: &mut Instant,
 ) -> Result<ContainerStats> {
-    if !std::path::Path::new(cgroup_base).exists() {
-        return Err(anyhow::anyhow!(
-            "Container '{}' cgroup not found. Is it running?",
-            name
-        ));
+    if !Path::new(cgroup_base).exists() {
+        bail!("Container '{name}' cgroup not found. Is it running?");
     }
 
-    // Memory
-    let memory_usage: u64 = fs::read_to_string(format!("{}/memory.current", cgroup_base))
-        .map(|s| s.trim().parse().unwrap_or(0))
-        .unwrap_or(0);
+    let memory_usage = read_counter(cgroup_base, "memory.current");
 
-    let memory_limit_raw = fs::read_to_string(format!("{}/memory.max", cgroup_base))
+    // memory.max reads "max" when unlimited, which is not a number.
+    let memory_limit_raw = fs::read_to_string(format!("{cgroup_base}/memory.max"))
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "max".to_string());
-
-    let memory_limit: u64 = if memory_limit_raw == "max" {
+    let memory_limit = if memory_limit_raw == "max" {
         0
     } else {
         memory_limit_raw.parse().unwrap_or(0)
     };
 
-    // PIDs
-    let pids_current: u64 = fs::read_to_string(format!("{}/pids.current", cgroup_base))
-        .map(|s| s.trim().parse().unwrap_or(0))
-        .unwrap_or(0);
+    let swap_usage = read_counter(cgroup_base, "memory.swap.current");
+    let pids_current = read_counter(cgroup_base, "pids.current");
 
-    // CPU Calculation
     let current_cpu = read_cpu_usec(cgroup_base)?;
     let now = Instant::now();
 
@@ -132,7 +144,8 @@ fn get_container_stats(
             0.0
         }
     } else {
-        // First sample in one-shot mode: do a quick 80ms sample
+        // First sample in one-shot mode: take a short second reading so a
+        // single `nucleus stats` call still reports a real value.
         thread::sleep(Duration::from_millis(80));
         let next_cpu = read_cpu_usec(cgroup_base)?;
         let delta = next_cpu.saturating_sub(current_cpu) as f64;
@@ -146,6 +159,7 @@ fn get_container_stats(
         cpu_percentage,
         memory_usage,
         memory_limit,
+        swap_usage,
         pids_current,
     })
 }

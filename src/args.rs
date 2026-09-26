@@ -11,8 +11,6 @@ pub struct NucleusArgs {
     pub command: Option<Commands>,
 }
 
-pub type OxideArgs = NucleusArgs;
-
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Run a command in a new container
@@ -20,6 +18,16 @@ pub enum Commands {
     /// Internal subcommand used for child process orchestration
     #[command(name = "internal-child", hide = true)]
     InternalChild(RunArgs),
+    /// Internal subcommand that reaps a detached container and cleans up
+    #[command(name = "internal-reaper", hide = true)]
+    InternalReaper {
+        /// Name of the container to reap
+        #[arg(long)]
+        name: String,
+        /// PID of the container supervisor process
+        #[arg(long)]
+        pid: i32,
+    },
     /// Execute a command in a running container
     Exec {
         /// Name of the container
@@ -60,7 +68,7 @@ pub enum Commands {
     Rm {
         /// Name of the container
         name: String,
-        /// Force removal if running
+        /// Stop the container first if it is running
         #[arg(short, long)]
         force: bool,
     },
@@ -76,7 +84,7 @@ pub enum Commands {
     Stop {
         /// Name of the container to stop
         name: String,
-        /// Seconds to wait for stop before killing the container
+        /// Seconds to wait for a graceful exit before sending SIGKILL
         #[arg(short, long, default_value = "10")]
         timeout: u64,
     },
@@ -93,13 +101,16 @@ pub enum Commands {
         /// Distribution name (e.g., alpine, ubuntu, debian)
         #[arg(default_value = "alpine")]
         distro: String,
+        /// Re-download and re-extract even if cached
+        #[arg(long)]
+        force: bool,
     },
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
     /// Name of the image to use (e.g., alpine, ubuntu)
-    #[arg(short, long, default_value = "alpine")]
+    #[arg(long, default_value = "alpine")]
     pub image: String,
 
     /// Unique name for the container instance
@@ -107,12 +118,17 @@ pub struct RunArgs {
     pub name: String,
 
     /// Static IP address for the container (e.g., 10.0.0.10). Auto-assigned if omitted.
-    #[arg(short, long)]
+    #[arg(long)]
     pub ip: Option<String>,
 
     /// Bridge network to use
     #[arg(long, default_value = "br0")]
     pub network: String,
+
+    /// Subnet used when creating the bridge (CIDR, e.g. 10.0.0.1/24).
+    /// Ignored if the bridge already exists.
+    #[arg(long, default_value = crate::net::DEFAULT_SUBNET)]
+    pub subnet: String,
 
     /// Memory limit for the container (e.g., 512M, 1G, or "max")
     #[arg(short, long, default_value = "1G")]
@@ -126,11 +142,11 @@ pub struct RunArgs {
     #[arg(long)]
     pub pids_limit: Option<u32>,
 
-    /// Bind volumes in host:container format
+    /// Bind volumes in source:destination[:ro] format
     #[arg(short = 'v', long)]
     pub volumes: Vec<String>,
 
-    /// Map host ports to container ports in host:container format
+    /// Map host ports to container ports ([host_ip:]host:container[/proto])
     #[arg(short = 'p', long)]
     pub ports: Vec<String>,
 

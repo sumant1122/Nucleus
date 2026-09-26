@@ -1,6 +1,6 @@
 [package]
 name = "Nucleus"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Sumant"]
 description = "A high-performance, minimalist container engine written in Rust."
@@ -10,7 +10,9 @@ categories = ["virtualization", "os", "command-line-utilities"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# We split 'unistd' into 'fs' (for chroot/chdir) and 'process' (for execvp)
+# nix features: sched (unshare/setns), mount (namespaces, pivot_root),
+# hostname (sethostname), process (fork/exec), fs (pivot_root/chdir),
+# user (uid_map), term (pty/tty ioctls), signal (sigwait, kill)
 nix = { version = "0.27.1", features = ["sched", "mount", "hostname", "process", "fs", "user", "term", "signal"] }
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"

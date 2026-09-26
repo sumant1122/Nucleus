@@ -1,151 +1,256 @@
 # Nucleus ⚛️
-**Nucleus** is a high-performance, minimalist container engine written in Rust. It serves as a robust demonstration of modern Linux containerization, utilizing kernel primitives like namespaces, Cgroups v2, OverlayFS, and `pivot_root` for secure and isolated process execution.
+
+**Nucleus** is a minimalist container engine written in Rust. It is a compact
+demonstration of how modern Linux containerisation works, built directly on kernel
+primitives: namespaces, cgroups v2, OverlayFS and `pivot_root`.
+
+> **Status: 0.3.0.** The 0.2.0 release did not compile and was withdrawn; see the
+> [changelog](CHANGELOG.md) for what was broken and what has been fixed.
 
 ## Key Features
-- **True PID Isolation**: Implements the "Fork-and-Wait" pattern to ensure the containerized process runs as **PID 1**.
-- **Secure Filesystem**: Uses `pivot_root` (not just `chroot`) combined with private mount propagation for industry-standard isolation.
-- **Image Management**: Support for multiple concurrent base images (Alpine, Ubuntu, Debian) with a local image store.
-- **Host-Driven Networking**: Configures container network interfaces from the host orchestrator using `nsenter`, ensuring high stability and avoiding `ENOMEM` errors during initialization.
-- **Advanced Networking**: 
-    - Automated Linux Bridge (`br0`) and `veth` pair orchestration.
-    - **IPAM**: Automatic IP address allocation from an internal subnet.
-    - Full Outbound Internet access via NAT/MASQUERADE.
-    - **Port Mapping**: Expose container services to the host via `iptables` DNAT rules.
-- **Resource Management (Cgroups v2)**:
-    - **Memory**: Support for human-readable limits (e.g., `1G`, `512M`) or `max`.
-    - **CPU**: Granular control over CPU cycles.
-    - **PIDs**: Prevents "fork bombs" and fork errors by managing the PIDs controller.
-- **Layered Storage**: Implements OverlayFS with a multi-image `lowerdir` and a writable session layer.
-- **Volumes**: Support for both host-path bind mounts and **Named Volumes** for persistent storage.
-- **Logging**: Integrated daemonless logging for background containers.
-- **Rootless Mode**: Supports running as an unprivileged user using User Namespaces (`CLONE_NEWUSER`), mapping host users to `root` inside the container.
-- **Seccomp Filtering**: Integrated syscall filtering via `libseccomp` to restrict the attack surface of containerized processes.
-- **Read-only RootFS**: Option to remount the entire root filesystem as read-only for enhanced security.
-- **Observability**: Real-time resource usage statistics (CPU, Memory, PIDs) via the `stats` command.
-- **Signal Forwarding**: Reliable propagation of signals (SIGINT, SIGTERM) from the host to the container's PID 1 for graceful shutdowns.
-- **Security Hardening**: Drops dangerous Linux capabilities (e.g., `CAP_SYS_RAWIO`, `CAP_MKNOD`, `CAP_SYS_PTRACE`) before entering the target process.
 
----
+- **True PID isolation** — the container process runs as **PID 1** in its own PID
+  namespace.
+- **Secure filesystem** — `pivot_root` (not `chroot`) with private mount propagation.
+- **Layered storage** — OverlayFS with a read-only image layer and a per-container
+  writable upper layer.
+- **Host-driven networking** — a Linux bridge, `veth` pairs, IPAM, NAT and port
+  forwarding, configured from the host via `nsenter`.
+- **Resource limits** — cgroups v2 memory, CPU and PID limits, with a swap cap so the
+  memory limit cannot be bypassed.
+- **Volumes** — host bind mounts and named volumes, optionally read-only.
+- **Observability** — `stats` for CPU, memory, swap and PIDs, and `logs` for detached
+  containers.
+- **Rootless mode** — runs as an unprivileged user through user namespaces.
+- **Hardening** — a runc-equivalent default capability set, a seccomp filter, a
+  read-only `/sys`, `no_new_privs`, and path-traversal-proof name and mount handling.
+- **No daemon** — a single binary; `--detach` spawns a small reaper that cleans up when
+  the container exits.
 
-## Why Nucleus? 🚀
+## Requirements
 
-Nucleus isn't trying to be a replacement for the entire Docker ecosystem; it's a **specialized, high-performance runtime** designed for systems engineers and modern infrastructure.
+| | |
+|---|---|
+| **OS** | Linux, kernel 4.18+ (cgroup v2 and OverlayFS required) |
+| **Build** | `rustc`, `cargo`, and `libseccomp-dev` |
+| **Runtime** (privileged mode) | `iptables`, `iproute2` (`ip`), `nsenter` |
+| **Privileges** | root for namespaces/networking/cgroups, or `--rootless` |
 
-### The Advantage
-1.  **Zero-Daemon Architecture:** Nucleus is a single, statically linked binary. It starts the container instantly and stays out of the way. No background daemons, no complex shims—just your process, isolated.
-2.  **Rust-Powered Safety:** Built with pure Rust, Nucleus provides memory safety without a Garbage Collector (GC). This results in a tiny memory footprint, making it ideal for high-density environments.
-3.  **Host-Driven Stability:** By configuring container networking from the host orchestrator via `nsenter`, Nucleus avoids initialization race conditions common in other runtimes.
-4.  **Edge & Embedded Ready:** With its minimal dependencies and small binary size (~2MB), Nucleus is the perfect "Swiss Army Knife" for isolation on resource-constrained hardware.
+`libseccomp-dev` is a **link-time** dependency:
 
-### Comparison: Nucleus vs. The Industry
-
-| Feature | Docker / Podman | Nucleus |
-| :--- | :--- | :--- |
-| **Binary Size** | Huge (100MB+) | Tiny (~2MB) |
-| **Startup Time** | Slow (~500ms+) | Instant (~10-20ms) |
-| **Runtime** | Go (Garbage Collected) | Rust (Zero-overhead) |
-| **Dependencies** | Many (iptables, dbus, etc.) | Minimal (Kernel primitives) |
-| **Architecture** | Daemon-based | Zero-daemon / Standalone |
-| **Use Case** | General App Dev | Edge, FaaS, Security, Embedded |
-
----
-
-## 🚀 Getting Started
-
-### 1. Download Pre-built Binaries
-You can download the latest pre-built binaries for **x86_64** and **aarch64** from the [GitHub Releases](https://github.com/sumant1122/Nucleus/releases) page.
-
-### 2. Prerequisites
-- **OS**: Linux with Kernel 4.18+ (Cgroups v2 and OverlayFS support required).
-- **Tools**: `rustc`, `cargo`, `python3`, `iptables`, `iproute2`, `libseccomp-dev`.
-- **Privileges**: Root access is recommended for full networking/cgroups, but **Rootless Mode** is supported for unprivileged isolation.
-
-### 3. Prepare a RootFS
-Nucleus requires a base directory to use as the container's root. You can now pull images directly:
 ```bash
-sudo ./target/release/Nucleus pull alpine
+# Debian / Ubuntu
+sudo apt-get install -y libseccomp-dev
+# Fedora / RHEL
+sudo dnf install -y libseccomp-devel
+# Arch
+sudo pacman -S libseccomp
 ```
 
----
+Nucleus is **dynamically linked** against `libseccomp`; it is not a static binary.
 
-## 🛠 Usage Examples
+## Getting Started
 
-### Run a basic isolated shell
 ```bash
-# IP is auto-assigned if omitted
+git clone https://github.com/sumant1122/Nucleus.git
+cd Nucleus
+cargo build --release          # or: just build
+
+sudo ./target/release/Nucleus pull alpine
 sudo ./target/release/Nucleus run --name my-shell --image alpine /bin/sh
 ```
 
-### Expose a Web Server (Port Mapping)
+Pre-built binaries for `x86_64` and `aarch64` are published on the
+[Releases page](https://github.com/sumant1122/Nucleus/releases).
+
+## Usage
+
+### Run a container
+
 ```bash
-sudo ./target/release/Nucleus run \
-  --name web-app \
-  --image ubuntu \
-  --ports 8080:80 \
-  /bin/sh
+# IP is auto-assigned if omitted
+sudo Nucleus run --name my-shell --image alpine /bin/sh
 ```
 
-### Mount Host Directories & Named Volumes
+### Environment, working directory and volumes
+
 ```bash
-# Named volumes are automatically created and persisted
-sudo ./target/release/Nucleus run \
+sudo Nucleus run \
   --name dev-box \
+  --env LOG_LEVEL=debug \
+  --workdir /srv/app \
   --volumes /home/user/data:/mnt/data \
   --volumes my-db-vol:/var/lib/db \
+  --volumes /etc/config:/etc/config:ro \
   /bin/sh
 ```
 
-### Resource-Limited Environment
+`--volumes` accepts `source:destination` and `source:destination:ro`. A source
+starting with `/`, `.` or `~` is a host path; anything else names a volume in the data
+directory.
+
+### Resource limits
+
 ```bash
-sudo ./target/release/Nucleus run \
+sudo Nucleus run \
   --name limited-box \
   --memory 512M \
+  --cpus 1.5 \
+  --pids-limit 128 \
   /bin/sh
 ```
 
-### Unprivileged Rootless Execution
+Without `--cpus`, a container is limited to a single CPU. `--memory` accepts `512M`,
+`1G`, `1GiB`, or `max` for no limit.
+
+### Port mapping
+
 ```bash
-./target/release/Nucleus run --rootless --name rootless-box /bin/sh
+# host:container
+sudo Nucleus run --name web-app --ports 8080:80 /bin/sh
+
+# bind address, and UDP
+sudo Nucleus run --name dns --ports 127.0.0.1:5353:53/udp /bin/sh
 ```
 
-### Background Execution & Logging
-Run a container in the background and fetch its logs:
+Port mapping requires privileged mode; rootless containers have no network namespace.
+
+### Networking
+
 ```bash
-sudo ./target/release/Nucleus run --name background-task --detach --image alpine /bin/sh -c "while true; do echo 'Working...'; sleep 5; done"
-sudo ./target/release/Nucleus logs background-task --follow
+# Use a specific bridge, and set the subnet used when creating it
+sudo Nucleus run --name web --network br1 --subnet 192.168.50.1/24 /bin/sh
 ```
 
-### Secure Read-only Environment
-Mount the root filesystem as read-only to prevent any modifications:
+The subnet of an existing bridge is detected and used, so `--subnet` only applies when
+Nucleus creates the bridge.
+
+### Detached execution and logs
+
 ```bash
-sudo ./target/release/Nucleus run --readonly --name secure-box /bin/sh
+sudo Nucleus run --name worker --detach /bin/sh -c 'while true; do echo working; sleep 5; done'
+sudo Nucleus logs worker --follow
 ```
 
-### Real-time Resource Statistics
-Monitor a container's CPU, Memory, and PID usage:
+A detached container is reaped automatically when it exits, and its veth pair, cgroup,
+port rules and overlay layers are removed.
+
+### Inspecting and interacting
+
 ```bash
-sudo ./target/release/Nucleus stats my-shell --stream
+sudo Nucleus list                     # or: ps
+sudo Nucleus inspect my-shell         # full state as JSON
+sudo Nucleus exec my-shell -- /bin/sh  # run a command inside a running container
+sudo Nucleus stats my-shell --stream  # live CPU / memory / swap / PIDs
 ```
 
-### List running containers
+### Images
+
 ```bash
-./target/release/Nucleus list
+sudo Nucleus pull alpine
+sudo Nucleus images
+sudo Nucleus rmi alpine
 ```
 
-### Stop a running container
+Supported images are `alpine`, `ubuntu` and `debian` for `x86_64`, `aarch64` and
+`armhf` (`debian` is not published for `armhf`). Pulling for an unsupported
+architecture is an error rather than a silent fall back to an x86_64 rootfs. Cached
+archives are keyed by architecture.
+
+### Stopping and removing
+
 ```bash
-sudo ./target/release/Nucleus stop my-shell
+sudo Nucleus stop my-shell            # SIGTERM, then SIGKILL after --timeout (default 10s)
+sudo Nucleus stop my-shell --timeout 30
+sudo Nucleus rm my-shell --force
 ```
 
+`stop` delivers SIGTERM to the container's init process and escalates to SIGKILL after
+the timeout. Note the kernel behaviour this inherits from Docker: a PID-namespace init
+that has not installed a SIGTERM handler discards the signal, so such containers are
+always escalated to SIGKILL. Install a handler (or wrap your command in `sh -c` with a
+`trap`) for a genuinely graceful shutdown.
 
----
+## Rootless Mode
 
-## 📂 Project Structure
-- `src/main.rs`: Entry point and process orchestration.
-- `src/args.rs`: CLI argument definitions using `clap`.
-- `src/orchestrator.rs`: Host-side setup (Networking, Cgroups, IPTables, `nsenter` config).
-- `src/container.rs`: Inside-the-container setup (PID 1 forking, `pivot_root`, Capabilities).
-- `src/utils.rs`: Shared helpers for shell commands and memory parsing.
+```bash
+Nucleus run --rootless --name rootless-box --image alpine /bin/sh
+```
 
-## ⚖️ License
-MIT / Apache-2.0
+Rootless mode uses user namespaces and requires no privileges. It has real
+limitations:
+
+- **No networking.** The container gets an isolated, unconfigured network namespace.
+  Port mapping is rejected.
+- **No resource limits.** No cgroup is attached, so `--memory`, `--cpus` and
+  `--pids-limit` are not enforced and `stats` is unavailable.
+- **`/proc`, `/sys` and `/sys/fs/cgroup` are bind-mounted from the host** rather than
+  fresh kernel instances, because the kernel forbids mounting a new procfs inside a
+  user namespace when the host's `/proc` is not fully visible. Some host `/proc` detail
+  is therefore visible inside the container.
+
+## Security Notes
+
+- Container names are restricted to `[A-Za-z0-9._-]` and cannot traverse paths, because
+  they are used to build state file and cgroup paths.
+- Volume and working-directory destinations are normalised; `..` components are
+  rejected so a mount cannot escape the container root.
+- The container process keeps only the runc default capability set
+  (`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_KILL`,
+  `CAP_SETGID`, `CAP_SETUID`, `CAP_SETPCAP`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`,
+  `CAP_SYS_CHROOT`, `CAP_MKNOD`, `CAP_AUDIT_WRITE`, `CAP_SETFCAP`). `CAP_SYS_ADMIN`,
+  `CAP_SYS_PTRACE`, `CAP_NET_ADMIN` and friends are dropped from all four capability
+  sets.
+- Seccomp denies roughly 45 syscalls covering namespace and mount manipulation,
+  tracing and eBPF, keyring, time-setting and kernel module operations. `clone3`
+  returns `ENOSYS` so glibc falls back to `clone`.
+- `no_new_privs` is set before the seccomp filter is loaded, so setuid binaries inside
+  the container cannot regain privilege.
+- `/etc/resolv.conf` inherits the host's upstream resolvers, but loopback addresses are
+  dropped: a stub resolver such as systemd-resolved's `127.0.0.53` is not reachable
+  from inside a container, so public resolvers are used instead.
+
+## Comparison
+
+Nucleus is not trying to replace Docker or Podman. It is a small, readable
+implementation of the underlying mechanisms.
+
+| | Docker / Podman | Nucleus |
+| :--- | :--- | :--- |
+| Scope | Full ecosystem | Isolation primitives only |
+| Architecture | Daemon-based | No daemon; `--detach` spawns a reaper |
+| Linking | Go, static | Rust, dynamically linked against `libseccomp` |
+| Host tooling | Vendored | Uses `ip`, `iptables`, `nsenter` |
+| Networking | Full CNI/plugins | Single bridge, IPAM, NAT, DNAT |
+| Use case | General workloads | Learning, edge, minimal hosts |
+
+## Project Structure
+
+| File | Responsibility |
+| :--- | :--- |
+| `src/main.rs` | CLI dispatch and the `exec`, `inspect`, `list`, `images`, `rmi`, `rm` commands |
+| `src/args.rs` | Command-line definitions (`clap`) |
+| `src/orchestrator.rs` | Host-side setup: bridge, veth, cgroups, iptables, IPAM, teardown, reaping |
+| `src/container.rs` | In-container setup: namespaces, OverlayFS, `pivot_root`, `/dev`, capabilities, seccomp |
+| `net.rs` | IPv4 subnet arithmetic, port mapping parsing, iptables and bridge helpers |
+| `state.rs` | Container state persistence, atomic writes, liveness detection |
+| `image.rs` | Image registry, download, atomic extraction |
+| `stats.rs` | cgroup-based resource statistics |
+| `utils.rs` | Name and path validation, memory parsing, directory layout |
+
+## Development
+
+```bash
+just build         # release build
+just check         # fmt --check + clippy -D warnings (no side effects)
+just test          # unit + integration tests
+just ci            # everything CI runs
+just test-integration   # lifecycle tests, run with sudo
+```
+
+The unit and CLI tests run unprivileged. The container lifecycle tests need root and
+self-skip otherwise; CI runs them in a separate non-blocking job.
+
+## License
+
+MIT OR Apache-2.0
