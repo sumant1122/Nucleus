@@ -5,7 +5,7 @@
 //! socket, plus exec, file, snapshot, and event-stream endpoints.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{Json, Sse},
     routing::{delete, get, post},
@@ -414,6 +414,67 @@ async fn exec_stream_sandbox(
     Ok(Sse::new(stream))
 }
 
+/// GET /sandboxes/:id/files — read a file or list a directory.
+///
+/// Query params:
+/// - `path` — file or directory path inside the sandbox
+/// - `list` — when "true", returns a directory listing instead of file content
+async fn get_file(
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    State(_state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let path = params.get("path").cloned().unwrap_or_default();
+    let list = params.get("list").map(|v| v == "true").unwrap_or(false);
+
+    // Verify the sandbox exists.
+    let _config = get_container_config(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if list {
+        let listing = nucleus_core::list_dir(&id, &path).map_err(|e| {
+            error!("failed to list dir {path} in {id}: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        Ok(Json(serde_json::to_value(&listing).unwrap()))
+    } else {
+        let content = nucleus_core::read_file(&id, &path).map_err(|e| {
+            error!("failed to read file {path} in {id}: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        Ok(Json(serde_json::to_value(&content).unwrap()))
+    }
+}
+
+/// PUT /sandboxes/:id/files — write a file to the sandbox.
+///
+/// Query params:
+/// - `path` — file path inside the sandbox
+/// - `mode` — optional file mode (e.g. "0755")
+async fn put_file(
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    State(_state): State<AppState>,
+    Json(req): Json<nucleus_api::WriteFileRequest>,
+) -> Result<StatusCode, StatusCode> {
+    // Verify the sandbox exists.
+    let _config = get_container_config(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let mode = params
+        .get("mode")
+        .and_then(|m| u32::from_str_radix(m, 8).ok());
+
+    nucleus_core::write_file(&id, &req.path, &req.content, mode).map_err(|e| {
+        error!("failed to write file {} in {id}: {e:#}", req.path);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// GET /sandboxes/:id/events — Server-Sent Events stream for sandbox events.
 async fn sandbox_events(
     Path(id): Path<String>,
@@ -456,6 +517,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/sandboxes/:id/stop", post(stop_sandbox))
         .route("/sandboxes/:id/exec", post(exec_in_sandbox))
         .route("/sandboxes/:id/exec/stream", post(exec_stream_sandbox))
+        .route("/sandboxes/:id/files", get(get_file).put(put_file))
         .route("/sandboxes/:id/events", get(sandbox_events))
         .with_state(state);
 

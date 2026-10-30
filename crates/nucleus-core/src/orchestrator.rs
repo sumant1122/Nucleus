@@ -849,6 +849,109 @@ pub fn exec_command_stream(
     Ok(())
 }
 
+/// Reads a file from a sandbox's overlay filesystem.
+///
+/// Reads directly from the merged overlay directory on the host, which
+/// reflects the container's current filesystem view.
+pub fn read_file(name: &str, path: &str) -> Result<nucleus_api::ReadFileResponse> {
+    validate_container_name(name)?;
+
+    let merged_dir = crate::utils::get_nucleus_runtime_dir()
+        .join("containers")
+        .join(name)
+        .join("merged");
+
+    let file_path = merged_dir.join(path);
+    let content = fs::read(&file_path)
+        .with_context(|| format!("Failed to read file '{path}' in sandbox '{name}'"))?;
+    let size = content.len() as u64;
+
+    Ok(nucleus_api::ReadFileResponse {
+        path: path.to_string(),
+        content,
+        size,
+    })
+}
+
+/// Writes a file to a sandbox's overlay filesystem.
+///
+/// Writes directly to the merged overlay directory, which triggers overlay
+/// copy-up automatically. The container must exist (overlay must be present).
+pub fn write_file(
+    name: &str,
+    path: &str,
+    content: &[u8],
+    mode: Option<u32>,
+) -> Result<()> {
+    validate_container_name(name)?;
+
+    let merged_dir = crate::utils::get_nucleus_runtime_dir()
+        .join("containers")
+        .join(name)
+        .join("merged");
+
+    let file_path = merged_dir.join(path);
+
+    // Create parent directories if needed.
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent dirs for '{path}'"))?;
+    }
+
+    fs::write(&file_path, content)
+        .with_context(|| format!("Failed to write file '{path}' in sandbox '{name}'"))?;
+
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(mode);
+        fs::set_permissions(&file_path, perms)
+            .with_context(|| format!("Failed to set mode on '{path}'"))?;
+    }
+
+    Ok(())
+}
+
+/// Lists a directory inside a sandbox's overlay filesystem.
+pub fn list_dir(name: &str, path: &str) -> Result<nucleus_api::ListFilesResponse> {
+    validate_container_name(name)?;
+
+    let merged_dir = crate::utils::get_nucleus_runtime_dir()
+        .join("containers")
+        .join(name)
+        .join("merged");
+
+    let dir_path = merged_dir.join(path);
+    let entries = fs::read_dir(&dir_path)
+        .with_context(|| format!("Failed to list directory '{path}' in sandbox '{name}'"))?;
+
+    let mut result = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let full_path = entry.path();
+        let rel_path = full_path
+            .strip_prefix(&merged_dir)
+            .unwrap_or(&full_path)
+            .to_string_lossy()
+            .to_string();
+
+        result.push(nucleus_api::FileEntry {
+            name,
+            path: rel_path,
+            is_dir: metadata.is_dir(),
+            size: metadata.len(),
+        });
+    }
+
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(nucleus_api::ListFilesResponse {
+        path: path.to_string(),
+        entries: result,
+    })
+}
+
 /// Configures the loopback and veth interface inside the container's netns.
 fn configure_container_network(
     pid: &str,

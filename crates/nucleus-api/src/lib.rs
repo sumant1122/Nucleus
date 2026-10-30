@@ -119,13 +119,22 @@ pub struct StreamExecRequest {
     pub output_cap_bytes: Option<usize>,
 }
 
-/// File read request.
+/// File entry in a directory listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+/// Request to read a file from a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadFileRequest {
     pub path: String,
 }
 
-/// File write request.
+/// Request to write a file to a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteFileRequest {
     pub path: String,
@@ -133,13 +142,19 @@ pub struct WriteFileRequest {
     pub mode: Option<u32>,
 }
 
-/// File list entry.
+/// Response for file read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileEntry {
-    pub name: String,
+pub struct ReadFileResponse {
     pub path: String,
-    pub is_dir: bool,
+    pub content: Vec<u8>,
     pub size: u64,
+}
+
+/// Response for file list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListFilesResponse {
+    pub path: String,
+    pub entries: Vec<FileEntry>,
 }
 
 /// Sandbox event emitted to the event stream.
