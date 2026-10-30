@@ -9,7 +9,7 @@ use crate::utils::{
     MemoryLimit, Volume, generate_veth_names, get_nucleus_log_dir, get_nucleus_runtime_dir,
     normalize_container_path, parse_env_assignment, parse_volume, validate_container_name,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, anyhow};
 use nix::sys::signal::{self, SigSet, Signal};
 use nix::unistd::{Pid, pipe, write};
 use wait_timeout::ChildExt;
@@ -699,6 +699,154 @@ pub fn exec_command(
         duration_ms: start.elapsed().as_millis() as u64,
         truncated,
     })
+}
+
+/// Streams command execution inside a running container, sending events via `tx`.
+///
+/// Each chunk of stdout/stderr is sent as an [`ExecEvent::Stdout`] /
+/// [`ExecEvent::Stderr`], followed by [`ExecEvent::Exit`] when the command
+/// finishes. Output is capped at `output_cap_bytes` total across both streams.
+pub fn exec_command_stream(
+    name: &str,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    timeout_seconds: Option<u64>,
+    output_cap_bytes: Option<usize>,
+    tx: std::sync::mpsc::Sender<nucleus_api::ExecEvent>,
+) -> Result<()> {
+    validate_container_name(name)?;
+    let state = require_running_container(name)?;
+
+    // Build nsenter arguments to enter the container's namespaces.
+    let mut nsenter_args: Vec<String> = vec![
+        "-t".to_string(),
+        state.pid.to_string(),
+        "--mount".to_string(),
+        "--uts".to_string(),
+        "--ipc".to_string(),
+        "--net".to_string(),
+        "--pid".to_string(),
+        "--fork".to_string(),
+    ];
+
+    if let Some(dir) = workdir {
+        let normalized = crate::utils::normalize_container_path(dir)
+            .with_context(|| format!("Invalid working directory '{dir}'"))?;
+        nsenter_args.push(format!("--wd=/{normalized}"));
+    }
+    nsenter_args.push("--".to_string());
+    nsenter_args.extend_from_slice(command);
+
+    let mut cmd = Command::new("nsenter");
+    cmd.args(&nsenter_args);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    for assignment in env {
+        let (key, value) = crate::utils::parse_env_assignment(assignment)
+            .with_context(|| format!("Invalid environment variable '{assignment}'"))?;
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to spawn nsenter for container '{name}'"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout for '{name}'"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture stderr for '{name}'"))?;
+
+    let tx_stdout = tx.clone();
+    let tx_stderr = tx.clone();
+    let cap = output_cap_bytes.unwrap_or(usize::MAX);
+
+    // Read stdout in a background thread.
+    let stdout_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = stdout;
+        let mut buf = [0u8; 4096];
+        let mut total = 0usize;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let remaining = cap.saturating_sub(total);
+                    let take = n.min(remaining);
+                    if take > 0 {
+                        let chunk = String::from_utf8_lossy(&buf[..take]).to_string();
+                        let _ = tx_stdout.send(nucleus_api::ExecEvent::Stdout(chunk));
+                        total += take;
+                    }
+                    if total >= cap {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Read stderr in a background thread.
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = stderr;
+        let mut buf = [0u8; 4096];
+        let mut total = 0usize;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let remaining = cap.saturating_sub(total);
+                    let take = n.min(remaining);
+                    if take > 0 {
+                        let chunk = String::from_utf8_lossy(&buf[..take]).to_string();
+                        let _ = tx_stderr.send(nucleus_api::ExecEvent::Stderr(chunk));
+                        total += take;
+                    }
+                    if total >= cap {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait for the process with optional timeout.
+    let exit_code = if let Some(secs) = timeout_seconds {
+        match child
+            .wait_timeout(std::time::Duration::from_secs(secs))
+            .with_context(|| format!("Failed to wait for command in container '{name}'"))?
+        {
+            Some(status) => status.code().unwrap_or(1),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = tx.send(nucleus_api::ExecEvent::Exit { code: 124 });
+                bail!("Command timed out after {}s in container '{name}'", secs);
+            }
+        }
+    } else {
+        child
+            .wait()
+            .with_context(|| format!("Failed to wait for command in container '{name}'"))?
+            .code()
+            .unwrap_or(1)
+    };
+
+    // Wait for reader threads to finish.
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+
+    let _ = tx.send(nucleus_api::ExecEvent::Exit { code: exit_code });
+    Ok(())
 }
 
 /// Configures the loopback and veth interface inside the container's netns.

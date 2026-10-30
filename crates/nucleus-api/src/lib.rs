@@ -95,6 +95,30 @@ pub struct ExecResult {
     pub truncated: bool,
 }
 
+/// Events emitted during streaming exec.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ExecEvent {
+    /// A chunk of stdout output.
+    Stdout(String),
+    /// A chunk of stderr output.
+    Stderr(String),
+    /// The command has finished with the given exit code.
+    Exit { code: i32 },
+}
+
+/// Request to stream-exec a command inside a sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamExecRequest {
+    pub command: Vec<String>,
+    pub env: Vec<String>,
+    pub workdir: Option<String>,
+    /// Per-command timeout in seconds.
+    pub timeout_seconds: Option<u64>,
+    /// Maximum total output bytes before truncation.
+    pub output_cap_bytes: Option<usize>,
+}
+
 /// File read request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadFileRequest {

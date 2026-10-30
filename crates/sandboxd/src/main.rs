@@ -21,10 +21,10 @@ use nucleus_core::{
     list_configs, start_container, stop_container, ContainerConfig, ContainerState,
 };
 use serde::{Deserialize, Serialize};
-use futures_util::stream::{self, Stream};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+use tokio_stream::Stream;
 use tracing::{error, info};
 
 const SOCKET_PATH: &str = "/run/nucleus/sandboxd.sock";
@@ -349,21 +349,89 @@ async fn exec_in_sandbox(
     Ok(Json(result))
 }
 
+/// POST /sandboxes/:id/exec/stream — stream command output via SSE.
+async fn exec_stream_sandbox(
+    Path(id): Path<String>,
+    State(_state): State<AppState>,
+    Json(req): Json<StreamExecRequest>,
+) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, axum::Error>>>, StatusCode>
+{
+    // Verify the sandbox exists and is running.
+    let _config = get_container_config(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let _state = get_container_state(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Channel for streaming events from the blocking exec thread.
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<nucleus_api::ExecEvent>();
+
+    // Bridge channel from std::sync::mpsc to tokio::sync::mpsc for async streaming.
+    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<nucleus_api::ExecEvent>(128);
+
+    // Run the blocking exec in a spawn_blocking task.
+    let exec_handle = tokio::task::spawn_blocking(move || {
+        let error_tx = std_tx.clone();
+        let result = nucleus_core::exec_command_stream(
+            &id,
+            &req.command,
+            &req.env,
+            req.workdir.as_deref(),
+            req.timeout_seconds,
+            req.output_cap_bytes,
+            std_tx,
+        );
+        if let Err(e) = result {
+            let _ = error_tx.send(nucleus_api::ExecEvent::Exit { code: 1 });
+            error!("failed to stream exec in {id}: {e:#}");
+        }
+    });
+
+    // Bridge task: forward events from std::sync::mpsc receiver to tokio mpsc sender.
+    let _bridge_handle = tokio::task::spawn(async move {
+        for event in std_rx {
+            if tokio_tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let stream = async_stream::stream! {
+        // Forward events from the blocking task to the SSE stream.
+        while let Some(event) = tokio_rx.recv().await {
+            let json = serde_json::to_string(&event).unwrap_or_default();
+            yield Ok(axum::response::sse::Event::default().data(json));
+            if matches!(event, nucleus_api::ExecEvent::Exit { .. }) {
+                break;
+            }
+        }
+        // Wait for the blocking task to complete.
+        let _ = exec_handle.await;
+    };
+
+    Ok(Sse::new(stream))
+}
+
 /// GET /sandboxes/:id/events — Server-Sent Events stream for sandbox events.
 async fn sandbox_events(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<axum::response::sse::Event, axum::Error>>> {
     let rx = state.event_sender(&id).subscribe();
-    let stream = stream::unfold(rx, move |mut rx| async move {
-        match rx.recv().await {
-            Ok(event) => {
-                let json = serde_json::to_string(&event).unwrap_or_default();
-                Some((Ok(axum::response::sse::Event::default().data(json)), rx))
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    yield Ok(axum::response::sse::Event::default().data(json));
+                }
+                Err(_) => break,
             }
-            Err(_) => None,
         }
-    });
+    };
 
     Sse::new(stream)
 }
@@ -387,6 +455,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/sandboxes/:id/start", post(start_sandbox))
         .route("/sandboxes/:id/stop", post(stop_sandbox))
         .route("/sandboxes/:id/exec", post(exec_in_sandbox))
+        .route("/sandboxes/:id/exec/stream", post(exec_stream_sandbox))
         .route("/sandboxes/:id/events", get(sandbox_events))
         .with_state(state);
 
