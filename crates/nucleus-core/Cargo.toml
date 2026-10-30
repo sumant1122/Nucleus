@@ -1,0 +1,25 @@
+[package]
+name = "nucleus-core"
+description = "Nucleus container engine core: namespaces, cgroups, OverlayFS, seccomp, sandbox runtime."
+repository = "https://github.com/sumant1122/Nucleus"
+keywords = ["containers", "rust", "linux", "namespaces", "cgroups", "sandbox"]
+categories = ["virtualization", "os", "command-line-utilities"]
+
+[dependencies]
+# nix features: sched (unshare/setns), mount (namespaces, pivot_root),
+# hostname (sethostname), process (fork/exec), fs (pivot_root/chdir),
+# user (uid_map), term (pty/tty ioctls), signal (sigwait, kill)
+nix = { version = "0.27.1", features = ["sched", "mount", "hostname", "process", "fs", "user", "term", "signal"] }
+anyhow = "1.0"
+caps = "0.5"
+libseccomp = "0.3.0"
+libc = "0.2"
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
+tar = "0.4"
+flate2 = "1.0"
+xz2 = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+proptest = "1.11.0"

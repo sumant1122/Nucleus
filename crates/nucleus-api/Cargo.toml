@@ -1,0 +1,11 @@
+[package]
+name = "nucleus-api"
+description = "Shared API types for the Nucleus agent sandbox: SandboxSpec, ExecRequest, Events, etc."
+repository = "https://github.com/sumant1122/Nucleus"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }

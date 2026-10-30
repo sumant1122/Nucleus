@@ -1,0 +1,19 @@
+[package]
+name = "sandboxd"
+description = "Nucleus agent sandbox service: persistent sandboxes, exec API, file API, snapshots, policy."
+repository = "https://github.com/sumant1122/Nucleus"
+
+[dependencies]
+nucleus-core = { path = "../nucleus-core" }
+nucleus-api = { path = "../nucleus-api" }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
