@@ -157,6 +157,20 @@ pub struct ListFilesResponse {
     pub entries: Vec<FileEntry>,
 }
 
+/// Request to create a snapshot of a sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotRequest {
+    pub name: Option<String>,
+}
+
+/// Response for snapshot creation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotResponse {
+    pub snapshot_id: String,
+    pub name: String,
+    pub created_at: String,
+}
+
 /// Sandbox event emitted to the event stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]

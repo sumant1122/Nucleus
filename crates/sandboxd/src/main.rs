@@ -475,6 +475,48 @@ async fn put_file(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// POST /sandboxes/:id/snapshot — create a snapshot of the sandbox overlay.
+///
+/// Query params:
+/// - `name` — optional snapshot name (defaults to auto-generated ID)
+async fn snapshot_sandbox(
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    State(_state): State<AppState>,
+    Json(req): Json<nucleus_api::SnapshotRequest>,
+) -> Result<Json<nucleus_api::SnapshotResponse>, StatusCode> {
+    let snapshot_name = req.name.or_else(|| params.get("name").cloned());
+
+    nucleus_core::snapshot_container(&id, snapshot_name.as_deref())
+        .map(Json)
+        .map_err(|e| {
+            error!("failed to snapshot {id}: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// POST /sandboxes/:id/reset — restore a sandbox from a snapshot.
+///
+/// Query params:
+/// - `name` — snapshot name to restore (required)
+async fn reset_sandbox(
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    State(_state): State<AppState>,
+) -> Result<Json<nucleus_api::SnapshotResponse>, StatusCode> {
+    let snapshot_name = params.get("name").cloned().ok_or_else(|| {
+        error!("reset {id} requires ?name=<snapshot>");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    nucleus_core::reset_container(&id, &snapshot_name)
+        .map(Json)
+        .map_err(|e| {
+            error!("failed to reset {id} from snapshot {snapshot_name}: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
 /// GET /sandboxes/:id/events — Server-Sent Events stream for sandbox events.
 async fn sandbox_events(
     Path(id): Path<String>,
@@ -518,6 +560,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/sandboxes/:id/exec", post(exec_in_sandbox))
         .route("/sandboxes/:id/exec/stream", post(exec_stream_sandbox))
         .route("/sandboxes/:id/files", get(get_file).put(put_file))
+        .route("/sandboxes/:id/snapshot", post(snapshot_sandbox))
+        .route("/sandboxes/:id/reset", post(reset_sandbox))
         .route("/sandboxes/:id/events", get(sandbox_events))
         .with_state(state);
 

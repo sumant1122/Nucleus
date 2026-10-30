@@ -4,7 +4,7 @@ use crate::net::{
     self, Ipv4Net, PortMapping, detect_bridge_subnet, parse_port_mapping, publish_port, u32_to_ip,
     unpublish_port,
 };
-use crate::state::{self, ContainerState, cgroup_dir_for};
+use crate::state::{self, ContainerState, cgroup_dir_for, get_container_state};
 use crate::utils::{
     MemoryLimit, Volume, generate_veth_names, get_nucleus_log_dir, get_nucleus_runtime_dir,
     normalize_container_path, parse_env_assignment, parse_volume, validate_container_name,
@@ -17,8 +17,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::os::fd::RawFd;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Everything needed to reclaim a container's host resources.
 ///
 /// Held by [`CleanupGuard`] so that any early return - including error paths -
@@ -950,6 +949,129 @@ pub fn list_dir(name: &str, path: &str) -> Result<nucleus_api::ListFilesResponse
         path: path.to_string(),
         entries: result,
     })
+}
+
+/// Creates a snapshot of a sandbox's overlay filesystem.
+///
+/// Copies the container's upper layer to a snapshot directory. The container
+/// can be running or stopped — the upper layer reflects all changes made so
+/// far.
+pub fn snapshot_container(
+    name: &str,
+    snapshot_name: Option<&str>,
+) -> Result<nucleus_api::SnapshotResponse> {
+    validate_container_name(name)?;
+
+    let runtime_dir = crate::utils::get_nucleus_runtime_dir();
+    let container_dir = runtime_dir.join("containers").join(name);
+    let upper_dir = container_dir.join("upper");
+
+    if !upper_dir.exists() {
+        bail!(
+            "sandbox '{}' has no overlay upper layer to snapshot",
+            name
+        );
+    }
+
+    let snapshot_id = nucleus_api::new_sandbox_id();
+    let snap_name = snapshot_name.unwrap_or(&snapshot_id).to_string();
+    let snapshots_dir = container_dir.join("snapshots");
+    fs::create_dir_all(&snapshots_dir)
+        .with_context(|| format!("Failed to create snapshots dir for '{name}'"))?;
+
+    let snapshot_dir = snapshots_dir.join(&snap_name);
+    if snapshot_dir.exists() {
+        bail!("snapshot '{snap_name}' already exists for sandbox '{name}'");
+    }
+
+    // Copy the upper layer recursively.
+    copy_dir_all(&upper_dir, &snapshot_dir)?;
+
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+
+    Ok(nucleus_api::SnapshotResponse {
+        snapshot_id,
+        name: snap_name,
+        created_at,
+    })
+}
+
+/// Restores a sandbox's overlay filesystem from a snapshot.
+///
+/// Stops the container if running, replaces the upper layer with the snapshot,
+/// and restarts it if it was running.
+pub fn reset_container(
+    name: &str,
+    snapshot_name: &str,
+) -> Result<nucleus_api::SnapshotResponse> {
+    validate_container_name(name)?;
+
+    let runtime_dir = crate::utils::get_nucleus_runtime_dir();
+    let container_dir = runtime_dir.join("containers").join(name);
+    let snapshots_dir = container_dir.join("snapshots");
+    let snapshot_dir = snapshots_dir.join(snapshot_name);
+
+    if !snapshot_dir.exists() {
+        bail!(
+            "snapshot '{snapshot_name}' not found for sandbox '{name}'"
+        );
+    }
+
+    let was_running = get_container_state(name)?.is_some();
+
+    // Stop if running.
+    if was_running {
+        let state = get_container_state(name)?
+            .ok_or_else(|| anyhow::anyhow!("sandbox '{name}' state not found"))?;
+        stop_container(&state, 10)?;
+    }
+
+    // Remove current upper and work directories.
+    let upper_dir = container_dir.join("upper");
+    let work_dir = container_dir.join("work");
+    let _ = fs::remove_dir_all(&upper_dir);
+    let _ = fs::remove_dir_all(&work_dir);
+
+    // Copy snapshot back as the new upper layer.
+    fs::create_dir_all(&upper_dir)
+        .with_context(|| format!("Failed to recreate upper dir for '{name}'"))?;
+    copy_dir_all(&snapshot_dir, &upper_dir)?;
+
+    // Restart if it was running.
+    if was_running {
+        start_container(name)?;
+    }
+
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+    Ok(nucleus_api::SnapshotResponse {
+        snapshot_id: snapshot_name.to_string(),
+        name: snapshot_name.to_string(),
+        created_at,
+    })
+}
+
+/// Recursively copies a directory tree.
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(dst)
+        .with_context(|| format!("Failed to create directory {:?}", dst))?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)
+                .with_context(|| format!("Failed to copy {:?} to {:?}", src_path, dst_path))?;
+        }
+    }
+    Ok(())
 }
 
 /// Configures the loopback and veth interface inside the container's netns.
