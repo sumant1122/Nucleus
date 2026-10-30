@@ -28,11 +28,14 @@ pub use container::{run_container_child, setup_controlling_terminal};
 pub use doctor::{collect as collect_host_report, Report};
 pub use image::{Distro, DISTROS, find_distro, list_images, pull_image_with, resolve_image_path, supported_distros};
 pub use net::{Ipv4Net, PortMapping, parse_port_mapping, publish_port, unpublish_port, DEFAULT_SUBNET};
-pub use orchestrator::{ParsedRun, TeardownSpec, validate_run_args};
+pub use orchestrator::{
+    create_container, destroy_container, start_container, validate_run_args, ParsedRun,
+    TeardownSpec,
+};
 pub use state::{
-    ContainerState, cgroup_dir_for, get_container_state, get_state_dir,
-    is_container_alive, list_containers, prune_stale_state, remove_state,
-    save_state,
+    ContainerConfig, ContainerState, cgroup_dir_for, get_container_config, get_container_state,
+    get_config_dir, get_state_dir, is_container_alive, list_configs, list_containers,
+    prune_stale_state, remove_config, remove_state, save_config, save_state,
 };
 pub use stats::ContainerStats;
 pub use utils::{

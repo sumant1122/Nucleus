@@ -89,6 +89,101 @@ impl ContainerState {
     }
 }
 
+/// Persistent sandbox configuration, kept on disk even when the container is
+/// stopped. This is distinct from [`ContainerState`] which only exists while
+/// the container is running.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ContainerConfig {
+    pub name: String,
+    pub image: String,
+    pub command: Vec<String>,
+    pub env: Vec<String>,
+    pub workdir: Option<String>,
+    pub memory: String,
+    pub cpus: Option<f64>,
+    pub pids_limit: Option<u32>,
+    pub rootless: bool,
+    pub readonly: bool,
+    pub network: String,
+    pub ip: Option<String>,
+    pub ports: Vec<crate::net::PortMapping>,
+    pub volumes: Vec<String>,
+    pub created_at: u64,
+}
+
+impl ContainerConfig {
+    /// Directory under the runtime dir where this container's overlay lives.
+    pub fn root_dir(&self) -> std::path::PathBuf {
+        crate::utils::get_nucleus_runtime_dir().join("containers").join(&self.name)
+    }
+}
+
+/// Directory for persisted container configs.
+pub fn get_config_dir() -> std::path::PathBuf {
+    crate::utils::get_nucleus_runtime_dir().join("configs")
+}
+
+pub fn config_path(name: &str) -> std::path::PathBuf {
+    get_config_dir().join(format!("{name}.json"))
+}
+
+/// Saves a container config atomically.
+pub fn save_config(config: &ContainerConfig) -> Result<()> {
+    let config_dir = get_config_dir();
+    fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
+
+    let final_path = config_path(&config.name);
+    let tmp_path = final_path.with_extension("json.tmp");
+
+    let json = serde_json::to_string_pretty(config).context("Failed to serialize container config")?;
+    fs::write(&tmp_path, json).context("Failed to write container config file")?;
+    fs::rename(&tmp_path, &final_path).context("Failed to commit container config file")?;
+    Ok(())
+}
+
+/// Loads a container config by name.
+pub fn get_container_config(name: &str) -> Result<Option<ContainerConfig>> {
+    let path = config_path(name);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path).context("Failed to read container config file")?;
+    let config = serde_json::from_str::<ContainerConfig>(&content)
+        .context("Failed to deserialize container config")?;
+    Ok(Some(config))
+}
+
+/// Removes a container config by name.
+pub fn remove_config(name: &str) -> Result<()> {
+    let path = config_path(name);
+    if path.exists() {
+        fs::remove_file(&path).context("Failed to remove container config file")?;
+    }
+    Ok(())
+}
+
+/// Lists all persisted container configs.
+pub fn list_configs() -> Result<Vec<ContainerConfig>> {
+    let config_dir = get_config_dir();
+    let mut configs = Vec::new();
+    if !config_dir.exists() {
+        return Ok(configs);
+    }
+    for entry in fs::read_dir(&config_dir).context("Failed to read config directory")? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let content = fs::read_to_string(&path).context("Failed to read config file")?;
+        let config: ContainerConfig =
+            serde_json::from_str(&content).context("Failed to deserialize config")?;
+        configs.push(config);
+    }
+    configs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(configs)
+}
+
 /// Root of the cgroup subtree owned by Nucleus.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup/nucleus";
 

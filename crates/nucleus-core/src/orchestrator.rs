@@ -466,6 +466,111 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
     Ok(())
 }
 
+/// Converts a [`ContainerConfig`] into [`RunArgs`] for the orchestrator.
+/// Sandboxes always run detached so the caller can continue after start.
+fn config_to_run_args(config: &state::ContainerConfig) -> crate::args::RunArgs {
+    crate::args::RunArgs {
+        image: config.image.clone(),
+        name: config.name.clone(),
+        ip: config.ip.clone(),
+        network: config.network.clone(),
+        subnet: crate::net::DEFAULT_SUBNET.to_string(),
+        memory: config.memory.clone(),
+        cpus: config.cpus,
+        pids_limit: config.pids_limit,
+        volumes: config.volumes.clone(),
+        ports: config
+            .ports
+            .iter()
+            .map(|p| p.to_string())
+            .collect(),
+        env: config.env.clone(),
+        workdir: config.workdir.clone(),
+        interactive: false,
+        tty: false,
+        command: config.command.clone(),
+        pipe_fd: None,
+        status_fd: None,
+        rootless: config.rootless,
+        detach: true,
+        readonly: config.readonly,
+    }
+}
+
+/// Creates a persistent sandbox config without allocating any host resources.
+/// Host networking, cgroups, and the child process are allocated on
+/// [`start_container`].
+pub fn create_container(config: &state::ContainerConfig) -> Result<()> {
+    if state::get_container_config(&config.name)?.is_some() {
+        bail!("container '{}' already exists", config.name);
+    }
+
+    // Validate the spec before persisting.
+    let run_args = config_to_run_args(config);
+    validate_run_args(&run_args)?;
+
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut config = config.clone();
+    config.created_at = started_at;
+
+    state::save_config(&config)?;
+    println!(
+        "[Nucleus] Created container '{}' (image: {})",
+        config.name, config.image
+    );
+    Ok(())
+}
+
+/// Starts a previously created container. Allocates networking, cgroups, and
+/// spawns the child process. The container runs detached.
+pub fn start_container(name: &str) -> Result<state::ContainerState> {
+    let config = state::get_container_config(name)?
+        .ok_or_else(|| anyhow::anyhow!("container '{}' not found", name))?;
+
+    if state::get_container_state(name)?.is_some() {
+        bail!("container '{}' is already running", name);
+    }
+
+    let mut run_args = config_to_run_args(&config);
+    run_args.detach = true;
+    let parsed = validate_run_args(&run_args)?;
+    run_parent_orchestrator(run_args, parsed)?;
+
+    state::get_container_state(name)?
+        .ok_or_else(|| anyhow::anyhow!("container '{}' state not found after start", name))
+}
+
+/// Stops and fully removes a container: runtime state, config, overlay, and
+/// any leftover host resources.
+pub fn destroy_container(name: &str) -> Result<()> {
+    // Stop if running.
+    if let Some(state) = state::get_container_state(name)? {
+        stop_container(&state, 10)?;
+    }
+
+    // Remove persisted config.
+    state::remove_config(name)?;
+
+    // Remove runtime state file.
+    state::remove_state(name)?;
+
+    // Remove overlay and container directory.
+    let runtime_dir = crate::utils::get_nucleus_runtime_dir();
+    let container_dir = runtime_dir.join("containers").join(name);
+    if let Err(e) = crate::utils::force_remove_dir_all(&container_dir) {
+        eprintln!(
+            "[Nucleus] Warning: could not remove {}: {e}",
+            container_dir.display()
+        );
+    }
+
+    println!("[Nucleus] Destroyed container '{}'.", name);
+    Ok(())
+}
+
 /// Configures the loopback and veth interface inside the container's netns.
 fn configure_container_network(
     pid: &str,
