@@ -1017,11 +1017,13 @@ dependencies = [
  "libc",
  "libseccomp",
  "nix",
+ "nucleus-api",
  "proptest",
  "reqwest",
  "serde",
  "serde_json",
  "tar",
+ "wait-timeout",
  "xz2",
 ]
 

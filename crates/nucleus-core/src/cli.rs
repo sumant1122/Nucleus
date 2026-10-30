@@ -363,7 +363,7 @@ fn stop_container(name: &str, timeout: u64) -> Result<()> {
 }
 
 /// Looks up a running container or exits with a clear message.
-fn require_running_container(name: &str) -> Result<ContainerState> {
+pub fn require_running_container(name: &str) -> Result<ContainerState> {
     crate::state::get_container_state(name)?
         .ok_or_else(|| anyhow::anyhow!("Container '{name}' not found or not running."))
 }

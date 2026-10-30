@@ -332,29 +332,21 @@ async fn exec_in_sandbox(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Simple synchronous exec for MVP. Streaming exec will be added via SSE.
-    let start = std::time::Instant::now();
-    let output = std::process::Command::new("nucleus")
-        .arg("exec")
-        .arg(&id)
-        .args(&req.command)
-        .output()
-        .map_err(|e| {
-            error!("failed to exec in {id}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // Use nucleus-core directly instead of shelling out to the CLI.
+    let result = nucleus_core::exec_command(
+        &id,
+        &req.command,
+        &req.env,
+        req.workdir.as_deref(),
+        req.timeout_seconds,
+        req.output_cap_bytes,
+    )
+    .map_err(|e| {
+        error!("failed to exec in {id}: {e:#}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(1);
-
-    Ok(Json(ExecResult {
-        exit_code,
-        stdout,
-        stderr,
-        duration_ms: start.elapsed().as_millis() as u64,
-        truncated: false,
-    }))
+    Ok(Json(result))
 }
 
 /// GET /sandboxes/:id/events — Server-Sent Events stream for sandbox events.

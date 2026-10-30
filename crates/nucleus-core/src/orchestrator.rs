@@ -1,3 +1,4 @@
+use crate::cli::require_running_container;
 use crate::args::RunArgs;
 use crate::net::{
     self, Ipv4Net, PortMapping, detect_bridge_subnet, parse_port_mapping, publish_port, u32_to_ip,
@@ -11,6 +12,7 @@ use crate::utils::{
 use anyhow::{Context, Result, bail};
 use nix::sys::signal::{self, SigSet, Signal};
 use nix::unistd::{Pid, pipe, write};
+use wait_timeout::ChildExt;
 use std::collections::HashSet;
 use std::fs;
 use std::os::fd::RawFd;
@@ -569,6 +571,134 @@ pub fn destroy_container(name: &str) -> Result<()> {
 
     println!("[Nucleus] Destroyed container '{}'.", name);
     Ok(())
+}
+
+/// Executes a command inside a running container and returns structured output.
+///
+/// Unlike the CLI `exec` path, this does not call `std::process::exit` on
+/// failure — it returns the exit code, stdout, and stderr so callers (such as
+/// `sandboxd`) can handle the result programmatically.
+pub fn exec_command(
+    name: &str,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    timeout_seconds: Option<u64>,
+    output_cap_bytes: Option<usize>,
+) -> Result<nucleus_api::ExecResult> {
+    use std::time::Instant;
+
+    validate_container_name(name)?;
+    let state = require_running_container(name)?;
+
+    // Build nsenter arguments to enter the container's namespaces.
+    let mut nsenter_args: Vec<String> = vec![
+        "-t".to_string(),
+        state.pid.to_string(),
+        "--mount".to_string(),
+        "--uts".to_string(),
+        "--ipc".to_string(),
+        "--net".to_string(),
+        "--pid".to_string(),
+        "--fork".to_string(),
+    ];
+
+    if let Some(dir) = workdir {
+        let normalized = crate::utils::normalize_container_path(dir)
+            .with_context(|| format!("Invalid working directory '{dir}'"))?;
+        nsenter_args.push(format!("--wd=/{normalized}"));
+    }
+    nsenter_args.push("--".to_string());
+    nsenter_args.extend_from_slice(command);
+
+    let start = Instant::now();
+
+    let mut cmd = Command::new("nsenter");
+    cmd.args(&nsenter_args);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // Apply environment variables.
+    for assignment in env {
+        let (key, value) = crate::utils::parse_env_assignment(assignment)
+            .with_context(|| format!("Invalid environment variable '{assignment}'"))?;
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to spawn nsenter for container '{name}'"))?;
+
+    // Wait with optional timeout, capturing the exit status.
+    let exit_status = if let Some(secs) = timeout_seconds {
+        match child
+            .wait_timeout(std::time::Duration::from_secs(secs))
+            .with_context(|| format!("Failed to wait for command in container '{name}'"))?
+        {
+            Some(status) => status,
+            None => {
+                // Timeout expired — kill the process.
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "Command timed out after {}s in container '{name}'",
+                    secs
+                );
+            }
+        }
+    } else {
+        child.wait().with_context(|| format!("Failed to wait for command in container '{name}'"))?
+    };
+
+    let exit_code = exit_status.code().unwrap_or(1);
+
+    // Capture output.
+    let stdout = child
+        .stdout
+        .take()
+        .map(|mut s| {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            buf
+        })
+        .unwrap_or_default();
+
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut s| {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            buf
+        })
+        .unwrap_or_default();
+
+    let mut stdout_str = String::from_utf8_lossy(&stdout).to_string();
+    let mut stderr_str = String::from_utf8_lossy(&stderr).to_string();
+
+    // Apply output cap.
+    let mut truncated = false;
+    if let Some(cap) = output_cap_bytes {
+        if stdout_str.len() > cap {
+            stdout_str.truncate(cap);
+            truncated = true;
+        }
+        if stderr_str.len() > cap {
+            stderr_str.truncate(cap);
+            truncated = true;
+        }
+    }
+
+    Ok(nucleus_api::ExecResult {
+        exit_code,
+        stdout: stdout_str,
+        stderr: stderr_str,
+        duration_ms: start.elapsed().as_millis() as u64,
+        truncated,
+    })
 }
 
 /// Configures the loopback and veth interface inside the container's netns.

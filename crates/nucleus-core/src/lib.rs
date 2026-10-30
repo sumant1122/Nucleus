@@ -29,8 +29,8 @@ pub use doctor::{collect as collect_host_report, Report};
 pub use image::{Distro, DISTROS, find_distro, list_images, pull_image_with, resolve_image_path, supported_distros};
 pub use net::{Ipv4Net, PortMapping, parse_port_mapping, publish_port, unpublish_port, DEFAULT_SUBNET};
 pub use orchestrator::{
-    create_container, destroy_container, start_container, stop_container, validate_run_args,
-    ParsedRun, TeardownSpec,
+    create_container, destroy_container, exec_command, start_container, stop_container,
+    validate_run_args, ParsedRun, TeardownSpec,
 };
 pub use state::{
     ContainerConfig, ContainerState, cgroup_dir_for, get_container_config, get_container_state,
