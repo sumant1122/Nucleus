@@ -2,6 +2,7 @@
 name = "sandboxd"
 description = "Nucleus agent sandbox service: persistent sandboxes, exec API, file API, snapshots, policy."
 repository = "https://github.com/sumant1122/Nucleus"
+edition = "2024"
 
 [dependencies]
 nucleus-core = { path = "../nucleus-core" }

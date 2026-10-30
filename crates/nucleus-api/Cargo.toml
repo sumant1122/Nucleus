@@ -2,6 +2,7 @@
 name = "nucleus-api"
 description = "Shared API types for the Nucleus agent sandbox: SandboxSpec, ExecRequest, Events, etc."
 repository = "https://github.com/sumant1122/Nucleus"
+edition = "2024"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

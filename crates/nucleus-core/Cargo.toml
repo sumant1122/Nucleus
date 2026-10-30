@@ -4,12 +4,14 @@ description = "Nucleus container engine core: namespaces, cgroups, OverlayFS, se
 repository = "https://github.com/sumant1122/Nucleus"
 keywords = ["containers", "rust", "linux", "namespaces", "cgroups", "sandbox"]
 categories = ["virtualization", "os", "command-line-utilities"]
+edition = "2024"
 
 [dependencies]
 # nix features: sched (unshare/setns), mount (namespaces, pivot_root),
 # hostname (sethostname), process (fork/exec), fs (pivot_root/chdir),
 # user (uid_map), term (pty/tty ioctls), signal (sigwait, kill)
 nix = { version = "0.27.1", features = ["sched", "mount", "hostname", "process", "fs", "user", "term", "signal"] }
+clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
 caps = "0.5"
 libseccomp = "0.3.0"

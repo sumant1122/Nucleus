@@ -810,7 +810,7 @@ fn verify_command_runnable(command: &str) -> Result<()> {
 /// without a controlling terminal the flag is rejected rather than silently
 /// ignored. Allocating a pty pair and proxying it from the orchestrator is not
 /// implemented yet.
-fn setup_controlling_terminal(args: &RunArgs) -> Result<()> {
+pub fn setup_controlling_terminal(args: &RunArgs) -> Result<()> {
     // SAFETY: setsid() takes no arguments and only fails if the process is
     // already a session leader, in which case the controlling terminal is
     // acquired by the ioctl below regardless.

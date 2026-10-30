@@ -1,47 +1,42 @@
-mod args;
-mod container;
-mod doctor;
-mod image;
-mod net;
-mod orchestrator;
-#[cfg(test)]
-mod properties;
-mod state;
-mod stats;
-mod utils;
+//! CLI dispatch for the Nucleus container engine.
+//!
+//! This module is kept in `nucleus-core` so both the `nucleus-cli` binary
+//! and future consumers (e.g. `sandboxd`) can reuse the same command
+//! handling without duplicating the match arms.
 
 use crate::args::{Commands, NucleusArgs};
 use crate::orchestrator::TeardownSpec;
 use crate::state::ContainerState;
-use crate::utils::{get_nucleus_log_dir, validate_container_name};
+use crate::utils::validate_container_name;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use nix::unistd::getuid;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn main() -> Result<()> {
+/// Entry point used by both `nucleus-core` and `nucleus-cli` binaries.
+pub fn run() -> Result<()> {
     let args = NucleusArgs::parse();
 
     match args.command {
         Some(Commands::InternalChild(run_args)) => {
             // Never returns on success; execs the container process.
-            return container::run_container_child(run_args);
+            return crate::container::run_container_child(run_args);
         }
         Some(Commands::InternalReaper { name, pid, spec }) => {
-            return orchestrator::run_reaper(&name, pid, &spec);
+            return crate::orchestrator::run_reaper(&name, pid, &spec);
         }
         Some(Commands::Run(run_args)) => {
             // Validate every flag before reporting a privilege problem, so a
             // typo is reported as a typo regardless of the caller's uid.
-            let parsed = orchestrator::validate_run_args(&run_args)?;
+            let parsed = crate::orchestrator::validate_run_args(&run_args)?;
 
             if !getuid().is_root() && !run_args.rootless {
                 bail!(
                     "Nucleus must be run as root to manage namespaces and networking. Use --rootless for unprivileged isolation."
                 );
             }
-            orchestrator::run_parent_orchestrator(run_args, parsed)?;
+            crate::orchestrator::run_parent_orchestrator(run_args, parsed)?;
         }
         Some(Commands::Exec {
             name,
@@ -70,7 +65,7 @@ fn main() -> Result<()> {
             list_images()?;
         }
         Some(Commands::Info { json }) => {
-            let report = doctor::collect();
+            let report = crate::doctor::collect();
             if json {
                 let payload = serde_json::json!({
                     "privileged_available": report.privileged_ok,
@@ -95,10 +90,10 @@ fn main() -> Result<()> {
             if !getuid().is_root() {
                 bail!("'nucleus flush-firewall' must be run as root");
             }
-            net::flush_chains()?;
+            crate::net::flush_chains()?;
             println!(
                 "[Nucleus] Flushed rules from: {}",
-                net::OWNED_CHAINS
+                crate::net::OWNED_CHAINS
                     .iter()
                     .map(|(table, chain)| format!("{table}/{chain}"))
                     .collect::<Vec<_>>()
@@ -106,7 +101,7 @@ fn main() -> Result<()> {
             );
         }
         Some(Commands::Rmi { image }) => {
-            image::remove_image(&image)?;
+            crate::image::remove_image(&image)?;
         }
         Some(Commands::Rm { name, force }) => {
             remove_container(&name, force)?;
@@ -118,10 +113,10 @@ fn main() -> Result<()> {
             stop_container(&name, timeout)?;
         }
         Some(Commands::Stats { name, stream }) => {
-            stats::display_stats(&name, stream)?;
+            crate::stats::display_stats(&name, stream)?;
         }
         Some(Commands::Pull { distro, force }) => {
-            image::pull_image_with(&distro, force)?;
+            crate::image::pull_image_with(&distro, force)?;
         }
         None => {
             println!("Use 'nucleus --help' for usage information.");
@@ -158,7 +153,7 @@ fn exec_in_container(
     ];
 
     if let Some(dir) = workdir {
-        let normalized = utils::normalize_container_path(dir)
+        let normalized = crate::utils::normalize_container_path(dir)
             .with_context(|| format!("Invalid working directory '{dir}'"))?;
         nsenter_args.push(format!("--wd=/{normalized}"));
     }
@@ -169,7 +164,7 @@ fn exec_in_container(
     cmd.args(&nsenter_args);
     // nsenter execs the target, so it inherits the environment we set here.
     for assignment in env {
-        let (key, value) = utils::parse_env_assignment(assignment)?;
+        let (key, value) = crate::utils::parse_env_assignment(assignment)?;
         cmd.env(key, value);
     }
     if !interactive && !tty {
@@ -222,12 +217,12 @@ fn inspect_container(name: &str) -> Result<()> {
 
 fn list_containers() -> Result<()> {
     // Reclaim state files for containers that are no longer running.
-    let pruned = state::prune_stale_state().unwrap_or(0);
+    let pruned = crate::state::prune_stale_state().unwrap_or(0);
     if pruned > 0 {
         println!("[Nucleus] Reclaimed {pruned} stale container record(s).");
     }
 
-    let containers = state::list_containers()?;
+    let containers = crate::state::list_containers()?;
     if containers.is_empty() {
         println!("[Nucleus] No containers running.");
         return Ok(());
@@ -262,7 +257,7 @@ fn truncate(value: &str, max: usize) -> String {
 }
 
 fn list_images() -> Result<()> {
-    let images = image::list_images()?;
+    let images = crate::image::list_images()?;
     if images.is_empty() {
         println!("[Nucleus] No local images. Run 'nucleus pull <distro>' to add one.");
         return Ok(());
@@ -296,12 +291,12 @@ fn dir_size(path: &std::path::Path) -> String {
             }
         }
     }
-    utils::format_bytes(total)
+    crate::utils::format_bytes(total)
 }
 
 fn remove_container(name: &str, force: bool) -> Result<()> {
     validate_container_name(name)?;
-    let state = state::get_container_state(name)?;
+    let state = crate::state::get_container_state(name)?;
 
     match state {
         Some(state) => {
@@ -309,7 +304,7 @@ fn remove_container(name: &str, force: bool) -> Result<()> {
                 bail!("Container '{name}' is running. Stop it first, or use --force.");
             }
             println!("[Nucleus] Removing running container '{name}'...");
-            orchestrator::stop_container(&state, 10)?;
+            crate::orchestrator::stop_container(&state, 10)?;
         }
         None => {
             // Not running: still clean up any leftover host resources.
@@ -318,10 +313,10 @@ fn remove_container(name: &str, force: bool) -> Result<()> {
                 veth_host: String::new(),
                 container_ip: String::new(),
                 ports: vec![],
-                cgroup_path: state::cgroup_dir_for(name),
+                cgroup_path: crate::state::cgroup_dir_for(name),
                 rootless: false,
             };
-            orchestrator::teardown_container(&spec, true)?;
+            crate::orchestrator::teardown_container(&spec, true)?;
         }
     }
 
@@ -333,7 +328,7 @@ fn show_logs(name: &str, follow: bool) -> Result<()> {
     validate_container_name(name)?;
 
     let log_dirs = [
-        get_nucleus_log_dir(),
+        crate::utils::get_nucleus_log_dir(),
         std::path::PathBuf::from("/tmp/nucleus/logs"),
     ];
     let log_path = log_dirs
@@ -364,11 +359,11 @@ fn show_logs(name: &str, follow: bool) -> Result<()> {
 fn stop_container(name: &str, timeout: u64) -> Result<()> {
     validate_container_name(name)?;
     let state = require_running_container(name)?;
-    orchestrator::stop_container(&state, timeout)
+    crate::orchestrator::stop_container(&state, timeout)
 }
 
 /// Looks up a running container or exits with a clear message.
 fn require_running_container(name: &str) -> Result<ContainerState> {
-    state::get_container_state(name)?
+    crate::state::get_container_state(name)?
         .ok_or_else(|| anyhow::anyhow!("Container '{name}' not found or not running."))
 }

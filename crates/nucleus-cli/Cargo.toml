@@ -4,6 +4,7 @@ description = "A high-performance, minimalist container engine written in Rust."
 repository = "https://github.com/sumant1122/Nucleus"
 keywords = ["containers", "rust", "linux", "namespaces", "cgroups"]
 categories = ["virtualization", "os", "command-line-utilities"]
+edition = "2024"
 
 [dependencies]
 nucleus-core = { path = "../nucleus-core" }
