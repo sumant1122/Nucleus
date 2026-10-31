@@ -42,7 +42,7 @@ jobs:
     # The integration tests start real containers, so they need an image. Its
     # absence was the cause of a confusing CI failure.
     - name: Pull a test image
-      run: cargo run --locked -- pull alpine
+      run: cargo run --locked --bin Nucleus -- pull alpine
 
     - name: Test
       run: cargo test --locked --verbose
@@ -77,7 +77,7 @@ jobs:
     - name: Pull a test image
       # `sudo` resets PATH, so cargo (installed under the runner user's home)
       # would not be found without passing the current PATH through.
-      run: sudo -E env "PATH=$PATH" cargo run --locked -- pull alpine
+      run: sudo -E env "PATH=$PATH" cargo run --locked --bin Nucleus -- pull alpine
 
     - name: Run integration tests as root
       run: sudo -E env "PATH=$PATH" cargo test --locked --test integration_tests -- --nocapture
