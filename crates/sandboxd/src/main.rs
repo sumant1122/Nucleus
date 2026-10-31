@@ -586,9 +586,10 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    info!("sandboxd listening on {addr} (note: TCP localhost for MVP; Unix socket coming)");
+    info!("sandboxd listening on {addr} (TCP localhost)");
 
-    axum::serve(listener, app).await?;
-
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| anyhow::anyhow!("server error: {e:#}"))?;
     Ok(())
 }
