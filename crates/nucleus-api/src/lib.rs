@@ -175,20 +175,41 @@ pub struct SnapshotResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum SandboxEvent {
-    Created { sandbox_id: String },
-    Started { sandbox_id: String },
-    Stopped { sandbox_id: String },
-    Destroyed { sandbox_id: String },
-    Paused { sandbox_id: String },
-    Resumed { sandbox_id: String },
-    Error { sandbox_id: String, message: String },
-    CommandStarted { sandbox_id: String, command: Vec<String> },
+    Created {
+        sandbox_id: String,
+    },
+    Started {
+        sandbox_id: String,
+    },
+    Stopped {
+        sandbox_id: String,
+    },
+    Destroyed {
+        sandbox_id: String,
+    },
+    Paused {
+        sandbox_id: String,
+    },
+    Resumed {
+        sandbox_id: String,
+    },
+    Error {
+        sandbox_id: String,
+        message: String,
+    },
+    CommandStarted {
+        sandbox_id: String,
+        command: Vec<String>,
+    },
     CommandFinished {
         sandbox_id: String,
         exit_code: i32,
         duration_ms: u64,
     },
-    NetworkDenied { sandbox_id: String, destination: String },
+    NetworkDenied {
+        sandbox_id: String,
+        destination: String,
+    },
 }
 
 /// Response to listing sandboxes.

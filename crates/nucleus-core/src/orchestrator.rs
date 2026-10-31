@@ -1,5 +1,5 @@
-use crate::cli::require_running_container;
 use crate::args::RunArgs;
+use crate::cli::require_running_container;
 use crate::net::{
     self, Ipv4Net, PortMapping, detect_bridge_subnet, parse_port_mapping, publish_port, u32_to_ip,
     unpublish_port,
@@ -9,15 +9,15 @@ use crate::utils::{
     MemoryLimit, Volume, generate_veth_names, get_nucleus_log_dir, get_nucleus_runtime_dir,
     normalize_container_path, parse_env_assignment, parse_volume, validate_container_name,
 };
-use anyhow::{Context, Result, bail, anyhow};
+use anyhow::{Context, Result, bail};
 use nix::sys::signal::{self, SigSet, Signal};
 use nix::unistd::{Pid, pipe, write};
-use wait_timeout::ChildExt;
 use std::collections::HashSet;
 use std::fs;
 use std::os::fd::RawFd;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use wait_timeout::ChildExt;
 /// Everything needed to reclaim a container's host resources.
 ///
 /// Held by [`CleanupGuard`] so that any early return - including error paths -
@@ -493,11 +493,7 @@ fn config_to_run_args(config: &state::ContainerConfig) -> crate::args::RunArgs {
         cpus: config.cpus,
         pids_limit: config.pids_limit,
         volumes: config.volumes.clone(),
-        ports: config
-            .ports
-            .iter()
-            .map(|p| p.to_string())
-            .collect(),
+        ports: config.ports.iter().map(|p| p.to_string()).collect(),
         env: config.env.clone(),
         workdir: config.workdir.clone(),
         interactive: false,
@@ -654,14 +650,13 @@ pub fn exec_command(
                 // Timeout expired — kill the process.
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!(
-                    "Command timed out after {}s in container '{name}'",
-                    secs
-                );
+                bail!("Command timed out after {}s in container '{name}'", secs);
             }
         }
     } else {
-        child.wait().with_context(|| format!("Failed to wait for command in container '{name}'"))?
+        child
+            .wait()
+            .with_context(|| format!("Failed to wait for command in container '{name}'"))?
     };
 
     let exit_code = exit_status.code().unwrap_or(1);
@@ -890,12 +885,7 @@ pub fn read_file(name: &str, path: &str) -> Result<nucleus_api::ReadFileResponse
 ///
 /// Writes directly to the merged overlay directory, which triggers overlay
 /// copy-up automatically. The container must exist (overlay must be present).
-pub fn write_file(
-    name: &str,
-    path: &str,
-    content: &[u8],
-    mode: Option<u32>,
-) -> Result<()> {
+pub fn write_file(name: &str, path: &str, content: &[u8], mode: Option<u32>) -> Result<()> {
     validate_container_name(name)?;
 
     let merged_dir = crate::utils::get_nucleus_runtime_dir()
@@ -981,10 +971,7 @@ pub fn snapshot_container(
     let upper_dir = container_dir.join("upper");
 
     if !upper_dir.exists() {
-        bail!(
-            "sandbox '{}' has no overlay upper layer to snapshot",
-            name
-        );
+        bail!("sandbox '{}' has no overlay upper layer to snapshot", name);
     }
 
     let snapshot_id = nucleus_api::new_sandbox_id();
@@ -1017,10 +1004,7 @@ pub fn snapshot_container(
 ///
 /// Stops the container if running, replaces the upper layer with the snapshot,
 /// and restarts it if it was running.
-pub fn reset_container(
-    name: &str,
-    snapshot_name: &str,
-) -> Result<nucleus_api::SnapshotResponse> {
+pub fn reset_container(name: &str, snapshot_name: &str) -> Result<nucleus_api::SnapshotResponse> {
     validate_container_name(name)?;
 
     let runtime_dir = crate::utils::get_nucleus_runtime_dir();
@@ -1029,9 +1013,7 @@ pub fn reset_container(
     let snapshot_dir = snapshots_dir.join(snapshot_name);
 
     if !snapshot_dir.exists() {
-        bail!(
-            "snapshot '{snapshot_name}' not found for sandbox '{name}'"
-        );
+        bail!("snapshot '{snapshot_name}' not found for sandbox '{name}'");
     }
 
     let was_running = get_container_state(name)?.is_some();
@@ -1072,8 +1054,7 @@ pub fn reset_container(
 
 /// Recursively copies a directory tree.
 fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-    fs::create_dir_all(dst)
-        .with_context(|| format!("Failed to create directory {:?}", dst))?;
+    fs::create_dir_all(dst).with_context(|| format!("Failed to create directory {:?}", dst))?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
@@ -1092,12 +1073,8 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
 ///
 /// Allows outbound traffic only to the listed destinations (CIDR or IP),
 /// and drops all other outbound traffic from the container.
-fn apply_network_allowlist(
-    bridge: &str,
-    allowlist: &[String],
-    container_ip: &str,
-) -> Result<()> {
-    use crate::net::{ensure_iptables_rule, CHAIN_FORWARD};
+fn apply_network_allowlist(_bridge: &str, allowlist: &[String], container_ip: &str) -> Result<()> {
+    use crate::net::{CHAIN_FORWARD, ensure_iptables_rule};
 
     // Allow established/related connections from the container.
     let established = vec![

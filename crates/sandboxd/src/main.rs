@@ -5,24 +5,22 @@
 //! socket, plus exec, file, snapshot, and event-stream endpoints.
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{StatusCode, header},
-    response::{Json, Sse},
-    routing::{delete, get, post},
     Router,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::{Json, Sse},
+    routing::{get, post},
 };
 
 use nucleus_api::{
-    new_sandbox_id, ExecRequest, ExecResult, ListSandboxesResponse, NetworkPolicy,
-    Sandbox, SandboxEvent, SandboxSpec, SandboxStatus, WriteFileRequest,
+    ExecRequest, ExecResult, ListSandboxesResponse, NetworkPolicy, Sandbox, SandboxEvent,
+    SandboxSpec, SandboxStatus, StreamExecRequest, new_sandbox_id,
 };
 use nucleus_core::{
-    create_container, destroy_container, exec_command, exec_command_stream, get_container_config,
-    get_container_state, list_configs, list_dir, read_file, reset_container, snapshot_container,
-    start_container, stop_container, validate_run_args, write_file, ContainerConfig, ContainerState,
-    NetworkPolicy as CoreNetworkPolicy,
+    ContainerConfig, ContainerState, NetworkPolicy as CoreNetworkPolicy, create_container,
+    destroy_container, get_container_config, get_container_state, list_configs, start_container,
+    stop_container,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
@@ -30,9 +28,6 @@ use tokio_stream::Stream;
 use tracing::{error, info};
 
 const SOCKET_PATH: &str = "/run/nucleus/sandboxd.sock";
-
-// Re-export for tests
-pub use nucleus_api::*;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -74,16 +69,16 @@ fn spec_to_config(spec: &SandboxSpec) -> ContainerConfig {
         command: spec.command.clone(),
         env: spec.env.clone(),
         workdir: spec.workdir.clone(),
-        memory: spec.memory.clone().unwrap_or_else(|| "1G".to_string()),
+        memory: spec.memory.clone().unwrap_or("1G".to_string()),
         cpus: spec.cpus,
         pids_limit: spec.pids_limit,
         rootless: spec.rootless,
         readonly: spec.readonly,
         network: match spec.network {
             nucleus_api::NetworkPolicy::None => CoreNetworkPolicy::None,
-            nucleus_api::NetworkPolicy::Allowlist => {
-                CoreNetworkPolicy::Allowlist { destinations: vec![] }
-            }
+            nucleus_api::NetworkPolicy::Allowlist => CoreNetworkPolicy::Allowlist {
+                destinations: vec![],
+            },
             nucleus_api::NetworkPolicy::Open => CoreNetworkPolicy::Open,
         },
         ip: None,
@@ -104,24 +99,32 @@ fn state_to_sandbox(state: &ContainerState, config: Option<&ContainerConfig>) ->
 
     let created_at = config
         .and_then(|c| chrono::DateTime::from_timestamp(c.created_at as i64, 0))
-        .unwrap_or_else(|| chrono::Utc::now());
+        .unwrap_or_else(chrono::Utc::now);
 
     Sandbox {
         id: state.name.clone(),
         image: state.image.clone(),
         status,
         pid: Some(state.pid),
-        ip: if state.ip.is_empty() { None } else { Some(state.ip.clone()) },
-        memory: config.and_then(|c| if c.memory.is_empty() { None } else { Some(c.memory.clone()) }),
+        ip: if state.ip.is_empty() {
+            None
+        } else {
+            Some(state.ip.clone())
+        },
+        memory: config.and_then(|c| {
+            if c.memory.is_empty() {
+                None
+            } else {
+                Some(c.memory.clone())
+            }
+        }),
         cpus: config.and_then(|c| c.cpus),
         pids_limit: config.and_then(|c| c.pids_limit),
         network: config
-            .and_then(|c| match &c.network {
-                CoreNetworkPolicy::None => Some(nucleus_api::NetworkPolicy::None),
-                CoreNetworkPolicy::Allowlist { .. } => {
-                    Some(nucleus_api::NetworkPolicy::Allowlist)
-                }
-                CoreNetworkPolicy::Open => Some(nucleus_api::NetworkPolicy::Open),
+            .map(|c| match &c.network {
+                CoreNetworkPolicy::None => nucleus_api::NetworkPolicy::None,
+                CoreNetworkPolicy::Allowlist { .. } => nucleus_api::NetworkPolicy::Allowlist,
+                CoreNetworkPolicy::Open => nucleus_api::NetworkPolicy::Open,
             })
             .unwrap_or(nucleus_api::NetworkPolicy::None),
         created_at,
@@ -130,7 +133,7 @@ fn state_to_sandbox(state: &ContainerState, config: Option<&ContainerConfig>) ->
         } else {
             Some(
                 chrono::DateTime::from_timestamp(state.started_at as i64, 0)
-                    .unwrap_or_else(|| chrono::Utc::now()),
+                    .unwrap_or_else(chrono::Utc::now),
             )
         },
         stopped_at: None,
@@ -176,7 +179,7 @@ async fn create_sandbox(
         pids_limit: config.pids_limit,
         network: spec.network,
         created_at: chrono::DateTime::from_timestamp(config.created_at as i64, 0)
-            .unwrap_or_else(|| chrono::Utc::now()),
+            .unwrap_or_else(chrono::Utc::now),
         started_at: None,
         stopped_at: None,
         exit_code: None,
@@ -207,15 +210,15 @@ async fn list_sandboxes(
                 pid: None,
                 ip: None,
                 memory: if config.memory.is_empty() {
-            None
-        } else {
-            Some(config.memory.clone())
-        },
+                    None
+                } else {
+                    Some(config.memory.clone())
+                },
                 cpus: config.cpus,
                 pids_limit: config.pids_limit,
                 network: NetworkPolicy::None,
                 created_at: chrono::DateTime::from_timestamp(config.created_at as i64, 0)
-                    .unwrap_or_else(|| chrono::Utc::now()),
+                    .unwrap_or_else(chrono::Utc::now),
                 started_at: None,
                 stopped_at: None,
                 exit_code: None,
@@ -250,15 +253,15 @@ async fn get_sandbox(
             pid: None,
             ip: None,
             memory: if config.memory.is_empty() {
-            None
-        } else {
-            Some(config.memory.clone())
-        },
+                None
+            } else {
+                Some(config.memory.clone())
+            },
             cpus: config.cpus,
             pids_limit: config.pids_limit,
             network: NetworkPolicy::None,
             created_at: chrono::DateTime::from_timestamp(config.created_at as i64, 0)
-                .unwrap_or_else(|| chrono::Utc::now()),
+                .unwrap_or_else(chrono::Utc::now),
             started_at: None,
             stopped_at: None,
             exit_code: None,
@@ -370,8 +373,7 @@ async fn exec_stream_sandbox(
     Path(id): Path<String>,
     State(_state): State<AppState>,
     Json(req): Json<StreamExecRequest>,
-) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, axum::Error>>>, StatusCode>
-{
+) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, axum::Error>>>, StatusCode> {
     // Verify the sandbox exists and is running.
     let _config = get_container_config(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -541,14 +543,9 @@ async fn sandbox_events(
     let rx = state.event_sender(&id).subscribe();
     let stream = async_stream::stream! {
         let mut rx = rx;
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    let json = serde_json::to_string(&event).unwrap_or_default();
-                    yield Ok(axum::response::sse::Event::default().data(json));
-                }
-                Err(_) => break,
-            }
+        while let Ok(event) = rx.recv().await {
+            let json = serde_json::to_string(&event).unwrap_or_default();
+            yield Ok(axum::response::sse::Event::default().data(json));
         }
     };
 
@@ -567,10 +564,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/sandboxes", post(create_sandbox).get(list_sandboxes))
-        .route(
-            "/sandboxes/:id",
-            get(get_sandbox).delete(destroy_sandbox),
-        )
+        .route("/sandboxes/:id", get(get_sandbox).delete(destroy_sandbox))
         .route("/sandboxes/:id/start", post(start_sandbox))
         .route("/sandboxes/:id/stop", post(stop_sandbox))
         .route("/sandboxes/:id/exec", post(exec_in_sandbox))

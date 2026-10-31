@@ -125,7 +125,9 @@ pub struct ContainerConfig {
 impl ContainerConfig {
     /// Directory under the runtime dir where this container's overlay lives.
     pub fn root_dir(&self) -> std::path::PathBuf {
-        crate::utils::get_nucleus_runtime_dir().join("containers").join(&self.name)
+        crate::utils::get_nucleus_runtime_dir()
+            .join("containers")
+            .join(&self.name)
     }
 }
 
@@ -146,7 +148,8 @@ pub fn save_config(config: &ContainerConfig) -> Result<()> {
     let final_path = config_path(&config.name);
     let tmp_path = final_path.with_extension("json.tmp");
 
-    let json = serde_json::to_string_pretty(config).context("Failed to serialize container config")?;
+    let json =
+        serde_json::to_string_pretty(config).context("Failed to serialize container config")?;
     fs::write(&tmp_path, json).context("Failed to write container config file")?;
     fs::rename(&tmp_path, &final_path).context("Failed to commit container config file")?;
     Ok(())
