@@ -63,6 +63,18 @@ sudo ./target/release/Nucleus run --name my-shell --image alpine /bin/sh
 Pre-built binaries for `x86_64` and `aarch64` are published on the
 [Releases page](https://github.com/sumant1122/Nucleus/releases).
 
+### Run sandboxd (agent sandbox service)
+
+```bash
+cargo build --release -p sandboxd
+sudo ./target/release/sandboxd
+# Then find the port: ss -tlnp | grep sandboxd
+```
+
+`sandboxd` listens on `http://127.0.0.1:<port>` and exposes the sandbox REST API.
+See the [AI Agent Sandbox](#ai-agent-sandbox-sandboxd) section for usage.
+
+
 ## Usage
 
 ### Run a container
@@ -205,6 +217,176 @@ limitations:
   user namespace when the host's `/proc` is not fully visible. Some host `/proc` detail
   is therefore visible inside the container.
 
+## AI Agent Sandbox (`sandboxd`)
+
+Nucleus includes `sandboxd` — a privileged local service that turns the container
+engine into a programmable sandbox for AI agents. Instead of one-shot `run` commands,
+`sandboxd` manages **persistent sandboxes** that can be created once, started and
+stopped repeatedly, and destroyed when no longer needed.
+
+### Architecture
+
+```
+AI agent / SDK / MCP client
+        │  HTTP/JSON over TCP (localhost)
+        ▼
+sandboxd (root, localhost only)
+        │
+        ▼
+nucleus-core engine
+        │
+        ▼
+namespaces / cgroups / OverlayFS / seccomp / iptables
+```
+
+`sandboxd` exposes a REST API on `http://127.0.0.1:<port>`. The port is chosen at
+startup; check with `ss -tlnp | grep sandboxd`.
+
+> **Security note:** Containers share the host kernel. `sandboxd` is suitable for
+> semi-trusted agent-generated code on a single host. Do not expose `sandboxd` to
+> untrusted networks or run untrusted multi-tenant code without a stronger isolation
+> backend (gVisor, Kata, or Firecracker) behind the same API.
+
+### Sandbox lifecycle
+
+```bash
+# Start the daemon
+sudo ./target/release/sandboxd
+
+# Create a sandbox (persistent config, no host resources yet)
+curl -s -X POST http://127.0.0.1:8080/sandboxes \
+  -H "Content-Type: application/json" \
+  -d '{"image": "alpine", "network": "none"}'
+
+# Start it (allocates networking, cgroups, spawns child)
+curl -s -X POST http://127.0.0.1:8080/sandboxes/my-box/start
+
+# Execute a command
+curl -s -X POST http://127.0.0.1:8080/sandboxes/my-box/exec \
+  -H "Content-Type: application/json" \
+  -d '{"command": ["uname", "-a"]}'
+
+# Stream output (SSE)
+curl -s -N -X POST http://127.0.0.1:8080/sandboxes/my-box/exec/stream \
+  -H "Content-Type: application/json" \
+  -d '{"command": ["seq", "1", "5"]}'
+
+# Stop and destroy
+curl -s -X POST http://127.0.0.1:8080/sandboxes/my-box/stop
+curl -s -X DELETE http://127.0.0.1:8080/sandboxes/my-box
+```
+
+### Network policy
+
+Network access is **off by default** (`"network": "none"`). The container gets no
+bridge or veth pair. Optional policies:
+
+| Policy | Behavior |
+|--------|----------|
+| `none` | No network interface (safest) |
+| `allowlist` | Bridge attached, but iptables only allows traffic to listed destinations |
+| `open` | Full NAT/egress (not recommended for untrusted code) |
+
+```bash
+# Allowlist only package registries
+curl -s -X POST http://127.0.0.1:8080/sandboxes \
+  -d '{"image": "alpine", "network": "allowlist", "network_allowlist": ["3.214.224.0/24", "185.125.190.0/24"]}'
+```
+
+### File API
+
+Read, write, and list files inside a sandbox's overlay filesystem:
+
+```bash
+# Read
+curl -s "http://127.0.0.1:8080/sandboxes/my-box/files?path=/etc/hostname"
+
+# Write
+curl -s -X PUT "http://127.0.0.1:8080/sandboxes/my-box/files?path=/tmp/note.txt" \
+  -d '{"path": "/tmp/note.txt", "content": "hello from agent"}'
+
+# List directory
+curl -s "http://127.0.0.1:8080/sandboxes/my-box/files?path=/tmp&list=true"
+```
+
+### Snapshot and reset
+
+Save and restore overlay filesystem state:
+
+```bash
+# Snapshot before a change
+curl -s -X POST "http://127.0.0.1:8080/sandboxes/my-box/snapshot?name=checkpoint"
+
+# Make changes inside the sandbox...
+curl -s -X POST http://127.0.0.1:8080/sandboxes/my-box/exec \
+  -d '{"command": ["rm", "-rf", "/etc"]}'
+
+# Restore from snapshot
+curl -s -X POST "http://127.0.0.1:8080/sandboxes/my-box/reset?name=checkpoint"
+```
+
+### SDKs
+
+**Python** (`sdks/python`):
+
+```python
+from nucleus_sdk import NucleusClient, SandboxSpec
+
+client = NucleusClient("http://127.0.0.1:8080")
+sandbox = client.create_sandbox(SandboxSpec(image="alpine", network="none"))
+client.start_sandbox(sandbox.id)
+result = client.exec_sandbox(sandbox.id, ["ls", "-la"])
+print(result.stdout)
+client.stop_sandbox(sandbox.id)
+client.destroy_sandbox(sandbox.id)
+client.close()
+```
+
+**TypeScript** (`sdks/typescript`):
+
+```typescript
+import { NucleusClient } from "@nucleus/sdk";
+
+const client = new NucleusClient("http://127.0.0.1:8080");
+const sandbox = await client.createSandbox({ image: "alpine" });
+await client.startSandbox(sandbox.id);
+const result = await client.execSandbox(sandbox.id, ["ls", "-la"]);
+console.log(result.stdout);
+await client.destroySandbox(sandbox.id);
+```
+
+### MCP server
+
+`mcp/nucleus_mcp` exposes all sandbox operations as [Model Context Protocol](https://modelcontextprotocol.io/) tools:
+
+```
+sandbox_create, sandbox_list, sandbox_get, sandbox_start, sandbox_stop,
+sandbox_destroy, sandbox_exec, sandbox_read_file, sandbox_write_file,
+sandbox_list_files, sandbox_snapshot, sandbox_reset
+```
+
+Run it:
+
+```bash
+cd mcp
+pip install -e .
+python3 -m nucleus_mcp
+```
+
+Configure your MCP client (e.g. Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "nucleus": {
+      "command": "python3",
+      "args": ["-m", "nucleus_mcp"],
+      "cwd": "/path/to/Nucleus/mcp"
+    }
+  }
+}
+```
+
 ## Networking and the Host Firewall
 
 Nucleus never writes rules directly into the host's `FORWARD`, `PREROUTING` or
@@ -267,28 +449,31 @@ implementation of the underlying mechanisms.
 
 ## Project Structure
 
-| File | Responsibility |
-| :--- | :--- |
-| `src/main.rs` | CLI dispatch and the `exec`, `inspect`, `list`, `images`, `rmi`, `rm` commands |
-| `src/args.rs` | Command-line definitions (`clap`) |
-| `src/orchestrator.rs` | Host-side setup: bridge, veth, cgroups, iptables, IPAM, teardown, reaping |
-| `src/container.rs` | In-container setup: namespaces, OverlayFS, `pivot_root`, `/dev`, capabilities, seccomp |
-| `net.rs` | IPv4 subnet arithmetic, port mapping parsing, iptables and bridge helpers |
-| `state.rs` | Container state persistence, atomic writes, liveness detection |
-| `image.rs` | Image registry, download, atomic extraction |
-| `stats.rs` | cgroup-based resource statistics |
-| `doctor.rs` | Host capability probing for `nucleus info` |
-| `properties.rs` | Property-based tests for the input parsers |
-| `utils.rs` | Name and path validation, memory parsing, directory layout |
+| Directory | Responsibility |
+|-----------|----------------|
+| `crates/nucleus-core/` | Engine library: namespaces, cgroups, OverlayFS, `pivot_root`, seccopus, sandbox lifecycle |
+| `crates/nucleus-cli/` | `nucleus` CLI binary (delegates to `nucleus-core`) |
+| `crates/nucleus-api/` | Shared API types (`SandboxSpec`, `ExecRequest`, `ExecEvent`, etc.) |
+| `crates/sandboxd/` | Privileged sandbox daemon with HTTP API |
+| `sdks/python/` | Python SDK (`NucleusClient`, `AsyncNucleusClient`) |
+| `sdks/typescript/` | TypeScript SDK (`NucleusClient` over `fetch`) |
+| `mcp/nucleus_mcp/` | MCP server exposing sandboxes as tools |
 
 ## Development
 
 ```bash
-just build         # release build
+just build         # release build (includes nucleus-core, nucleus-cli, sandboxd)
 just check         # fmt --check + clippy -D warnings (no side effects)
 just test          # unit + property + integration tests
 just ci            # everything CI runs
 just test-integration   # lifecycle tests, run with sudo
+```
+
+Build `sandboxd` directly:
+
+```bash
+cargo build --release -p sandboxd
+sudo ./target/release/sandboxd
 ```
 
 The input parsers that form the security boundary — container names, volume
