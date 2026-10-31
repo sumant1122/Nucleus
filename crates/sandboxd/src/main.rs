@@ -17,8 +17,10 @@ use nucleus_api::{
     Sandbox, SandboxEvent, SandboxSpec, SandboxStatus, WriteFileRequest,
 };
 use nucleus_core::{
-    create_container, destroy_container, get_container_config, get_container_state,
-    list_configs, start_container, stop_container, ContainerConfig, ContainerState,
+    create_container, destroy_container, exec_command, exec_command_stream, get_container_config,
+    get_container_state, list_configs, list_dir, read_file, reset_container, snapshot_container,
+    start_container, stop_container, validate_run_args, write_file, ContainerConfig, ContainerState,
+    NetworkPolicy as CoreNetworkPolicy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,7 +79,13 @@ fn spec_to_config(spec: &SandboxSpec) -> ContainerConfig {
         pids_limit: spec.pids_limit,
         rootless: spec.rootless,
         readonly: spec.readonly,
-        network: "br0".to_string(),
+        network: match spec.network {
+            nucleus_api::NetworkPolicy::None => CoreNetworkPolicy::None,
+            nucleus_api::NetworkPolicy::Allowlist => {
+                CoreNetworkPolicy::Allowlist { destinations: vec![] }
+            }
+            nucleus_api::NetworkPolicy::Open => CoreNetworkPolicy::Open,
+        },
         ip: None,
         ports: vec![],
         volumes: vec![],
@@ -107,7 +115,15 @@ fn state_to_sandbox(state: &ContainerState, config: Option<&ContainerConfig>) ->
         memory: config.and_then(|c| if c.memory.is_empty() { None } else { Some(c.memory.clone()) }),
         cpus: config.and_then(|c| c.cpus),
         pids_limit: config.and_then(|c| c.pids_limit),
-        network: NetworkPolicy::None,
+        network: config
+            .and_then(|c| match &c.network {
+                CoreNetworkPolicy::None => Some(nucleus_api::NetworkPolicy::None),
+                CoreNetworkPolicy::Allowlist { .. } => {
+                    Some(nucleus_api::NetworkPolicy::Allowlist)
+                }
+                CoreNetworkPolicy::Open => Some(nucleus_api::NetworkPolicy::Open),
+            })
+            .unwrap_or(nucleus_api::NetworkPolicy::None),
         created_at,
         started_at: if state.started_at == 0 {
             None

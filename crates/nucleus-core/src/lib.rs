@@ -36,7 +36,7 @@ pub use orchestrator::{
 pub use state::{
     ContainerConfig, ContainerState, cgroup_dir_for, get_container_config, get_container_state,
     get_config_dir, get_state_dir, is_container_alive, list_configs, list_containers,
-    prune_stale_state, remove_config, remove_state, save_config, save_state,
+    prune_stale_state, remove_config, remove_state, save_config, save_state, NetworkPolicy,
 };
 pub use stats::ContainerStats;
 pub use utils::{

@@ -136,6 +136,11 @@ pub struct RunArgs {
     #[arg(long, default_value = "br0")]
     pub network: String,
 
+    /// Allowed outbound destinations (CIDR or IP) when network policy is allowlist.
+    /// Empty means no restrictions (when network is not "none").
+    #[arg(long, default_value = "")]
+    pub network_allowlist: Vec<String>,
+
     /// Subnet used when creating the bridge (CIDR, e.g. 10.0.0.1/24).
     /// Ignored if the bridge already exists.
     #[arg(long, default_value = crate::net::DEFAULT_SUBNET)]

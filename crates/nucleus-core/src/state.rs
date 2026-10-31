@@ -89,6 +89,17 @@ impl ContainerState {
     }
 }
 
+/// Network access policy for a sandbox.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum NetworkPolicy {
+    /// No network access except loopback (default, safest).
+    None,
+    /// Allowlisted outbound destinations only.
+    Allowlist { destinations: Vec<String> },
+    /// Full NAT/egress (dangerous, not recommended for untrusted code).
+    Open,
+}
+
 /// Persistent sandbox configuration, kept on disk even when the container is
 /// stopped. This is distinct from [`ContainerState`] which only exists while
 /// the container is running.
@@ -104,7 +115,7 @@ pub struct ContainerConfig {
     pub pids_limit: Option<u32>,
     pub rootless: bool,
     pub readonly: bool,
-    pub network: String,
+    pub network: NetworkPolicy,
     pub ip: Option<String>,
     pub ports: Vec<crate::net::PortMapping>,
     pub volumes: Vec<String>,

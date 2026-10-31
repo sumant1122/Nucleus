@@ -188,7 +188,7 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
     // allocation and routing agree on the same network.
     let mut subnet = requested_subnet;
 
-    if !args.rootless {
+    if !args.rootless && !args.network.is_empty() {
         net::ensure_bridge(&args.network, &subnet)
             .with_context(|| format!("Failed to set up bridge '{}'", args.network))?;
         // An existing bridge keeps its own address, which is authoritative.
@@ -352,7 +352,7 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
     }
 
     // 7. Port publishing
-    if !args.rootless {
+    if !args.rootless && !args.network.is_empty() {
         net::enable_ip_forwarding()?;
         // Claim our own chains before adding any rules, so nothing is ever
         // written directly into the host's FORWARD/PREROUTING/POSTROUTING.
@@ -361,6 +361,11 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
         for mapping in &ports {
             publish_port(mapping, &container_ip)
                 .with_context(|| format!("Failed to publish port mapping '{mapping}'"))?;
+        }
+
+        // Apply network allowlist: deny outbound traffic to non-allowlisted destinations.
+        if !args.network_allowlist.is_empty() {
+            apply_network_allowlist(&args.network, &args.network_allowlist, &container_ip)?;
         }
     }
 
@@ -470,11 +475,19 @@ pub fn run_parent_orchestrator(args: RunArgs, parsed: ParsedRun) -> Result<()> {
 /// Converts a [`ContainerConfig`] into [`RunArgs`] for the orchestrator.
 /// Sandboxes always run detached so the caller can continue after start.
 fn config_to_run_args(config: &state::ContainerConfig) -> crate::args::RunArgs {
+    let (network, network_allowlist) = match &config.network {
+        state::NetworkPolicy::None => ("".to_string(), vec![]),
+        state::NetworkPolicy::Allowlist { destinations } => {
+            ("br0".to_string(), destinations.clone())
+        }
+        state::NetworkPolicy::Open => ("br0".to_string(), vec![]),
+    };
+
     crate::args::RunArgs {
         image: config.image.clone(),
         name: config.name.clone(),
         ip: config.ip.clone(),
-        network: config.network.clone(),
+        network,
         subnet: crate::net::DEFAULT_SUBNET.to_string(),
         memory: config.memory.clone(),
         cpus: config.cpus,
@@ -495,6 +508,7 @@ fn config_to_run_args(config: &state::ContainerConfig) -> crate::args::RunArgs {
         rootless: config.rootless,
         detach: true,
         readonly: config.readonly,
+        network_allowlist,
     }
 }
 
@@ -1071,6 +1085,55 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
                 .with_context(|| format!("Failed to copy {:?} to {:?}", src_path, dst_path))?;
         }
     }
+    Ok(())
+}
+
+/// Applies network allowlist iptables rules for a sandbox.
+///
+/// Allows outbound traffic only to the listed destinations (CIDR or IP),
+/// and drops all other outbound traffic from the container.
+fn apply_network_allowlist(
+    bridge: &str,
+    allowlist: &[String],
+    container_ip: &str,
+) -> Result<()> {
+    use crate::net::{ensure_iptables_rule, CHAIN_FORWARD};
+
+    // Allow established/related connections from the container.
+    let established = vec![
+        "-s".to_string(),
+        container_ip.to_string(),
+        "-m".to_string(),
+        "state".to_string(),
+        "--state".to_string(),
+        "ESTABLISHED,RELATED".to_string(),
+        "-j".to_string(),
+        "ACCEPT".to_string(),
+    ];
+    ensure_iptables_rule("filter", CHAIN_FORWARD, &established)?;
+
+    // Allow traffic to each allowlisted destination.
+    for dest in allowlist {
+        let rule = vec![
+            "-s".to_string(),
+            container_ip.to_string(),
+            "-d".to_string(),
+            dest.clone(),
+            "-j".to_string(),
+            "ACCEPT".to_string(),
+        ];
+        ensure_iptables_rule("filter", CHAIN_FORWARD, &rule)?;
+    }
+
+    // Drop all other outbound traffic from the container.
+    let drop_rule = vec![
+        "-s".to_string(),
+        container_ip.to_string(),
+        "-j".to_string(),
+        "DROP".to_string(),
+    ];
+    ensure_iptables_rule("filter", CHAIN_FORWARD, &drop_rule)?;
+
     Ok(())
 }
 
