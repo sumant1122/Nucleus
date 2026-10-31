@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-10-31
+
+### Added
+- **`sandboxd`** — privileged local daemon that manages persistent sandboxes for AI
+  agents. Exposes a REST API on `http://127.0.0.1:<port>` with endpoints for
+  create/list/get/start/stop/destroy, exec (sync + SSE streaming), file read/write/list,
+  snapshot/reset, and server-sent events.
+- **`nucleus-core`** — engine extracted as a consumable library (`lib.rs`) so `sandboxd`
+  and the CLI share the same runtime contract without parsing CLI output.
+- **`nucleus-api`** — shared request/response types (`SandboxSpec`, `ExecRequest`,
+  `ExecResult`, `ExecEvent`, `FileEntry`, `SnapshotResponse`, etc.) used by `sandboxd`,
+  SDKs, and the MCP server.
+- **`nucleus-cli`** — thin `nucleus` binary delegating to `nucleus_core::cli::run()`.
+- **Persistent sandbox lifecycle** — `ContainerConfig` saved to disk; sandboxes can be
+  created once and started/stopped multiple times. Overlay upper layers persist across
+  stops.
+- **Structured exec** — `exec_command()` returns `ExecResult` (exit code, stdout,
+  stderr, duration, truncation) instead of shelling out to the CLI.
+- **Streaming exec** — `POST /sandboxes/:id/exec/stream` streams stdout/stderr via SSE
+  with per-command timeout and output byte caps.
+- **File API** — `GET/PUT /sandboxes/:id/files` for reading, writing, and directory
+  listing inside a sandbox's overlay filesystem.
+- **Snapshot & reset** — `POST /snapshot` and `/reset` copy/restore overlay upper
+  layers for rollback.
+- **Network policy** — `NetworkPolicy` enum (`none`/`allowlist`/`open`); default-deny
+  egress with iptables allowlist rules.
+- **Python SDK** (`sdks/python`) — `NucleusClient` (sync) and `AsyncNucleusClient`
+  covering all API endpoints.
+- **TypeScript SDK** (`sdks/typescript`) — `NucleusClient` using native `fetch` with
+  SSE streaming via async generator.
+- **MCP server** (`mcp/nucleus_mcp`) — exposes all 14 sandbox operations as Model
+  Context Protocol tools (`sandbox_create`, `sandbox_exec`, `sandbox_read_file`,
+  `sandbox_write_file`, `sandbox_snapshot`, `sandbox_reset`, etc.).
+
+### Changed
+- **Workspace restructure** — `Cargo.toml` is now a virtual workspace with four crates:
+  `nucleus-core`, `nucleus-cli`, `nucleus-api`, `sandboxd`.
+- **Container config separated from runtime state** — `ContainerConfig` persists on
+  disk; `ContainerState` exists only while running.
+- **`ContainerConfig.network`** is now a `NetworkPolicy` enum instead of a plain bridge
+  name string.
+
+### Removed
+- **No more CLI shell-out from `sandboxd`** — exec calls `nucleus_core::exec_command()`
+  directly instead of spawning the `nucleus` binary.
+
 ## [0.3.0] - 2026-09-26
 
 ### Added
